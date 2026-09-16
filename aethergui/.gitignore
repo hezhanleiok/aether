@@ -1,0 +1,5 @@
+bin/
+core-bin/
+*.exe
+*.log
+vendor/
