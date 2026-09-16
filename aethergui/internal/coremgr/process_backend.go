@@ -258,7 +258,7 @@ var classifyReIdentity = regexp.MustCompile("identity ready")
 var classifyReConnected = regexp.MustCompile("socks5 server listening|tunnel validated|" + regexp.QuoteMeta("[+] connected") + "|serving")
 var classifyReScan = regexp.MustCompile("hunting for a working|scan mode=")
 var classifyReCandidate = regexp.MustCompile("candidate ok")
-var classifyReReconnect = regexp.MustCompile("reconnect|retry")
+var classifyReReconnect = regexp.MustCompile("reconnecting|retrying|rescanning")
 
 // Aether reports fatal startup failures on stderr as either "[-] ..." or
 // "Error: Other(...)".  The latter includes bind failures (for example a
@@ -269,8 +269,6 @@ var classifyReFail = regexp.MustCompile(`(?i)(?:\[-\].*)?(failed|error|exhausted
 func classify(line string) (kind string, ok bool) {
 	t := strings.TrimSpace(line)
 	switch {
-	case classifyReFail.MatchString(t):
-		return "failed", true
 	case classifyReIdentity.MatchString(t):
 		return "identity", true
 	case classifyReConnected.MatchString(t):
@@ -279,8 +277,14 @@ func classify(line string) (kind string, ok bool) {
 		return "candidate", true
 	case classifyReScan.MatchString(t):
 		return "scanning", true
+	// The core keeps retrying on these lines ("tunnel ended ... reconnecting",
+	// "blacklisting and rescanning"); they must surface as a reconnect, not as
+	// a final failure — otherwise the UI flips to "failed" while the tunnel
+	// is still recovering on its own.
 	case classifyReReconnect.MatchString(t):
 		return "reconnect", true
+	case classifyReFail.MatchString(t):
+		return "failed", true
 	}
 	return "", false
 }

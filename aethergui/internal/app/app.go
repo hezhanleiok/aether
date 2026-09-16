@@ -107,6 +107,9 @@ func New() (*App, error) {
 			fn(st)
 		}
 	})
+	// A pinned gateway that the core cannot use must not brick every later
+	// attempt: on failure, drop the pin and retry once with automatic scanning.
+	a.VPN.Subscribe(func(st vpn.State) { a.recoverFromFailedPin(st) })
 	pool.Subscribe(func() {
 		a.subMu.Lock()
 		subs := append([]func(){}, a.onNodes...)
@@ -217,6 +220,36 @@ func (a *App) TunnelDown() {
 	if a.Settings.AutoReconnect {
 		a.Reconnect()
 	}
+}
+
+// recoverFromFailedPin clears a pinned gateway that the core could not use and
+// retries once with automatic scanning. Without this, a stale pin persisted in
+// config.json (forced on the core via AETHER_PEER) makes every later attempt
+// fail with "verify timeout" — across restarts and protocol switches alike.
+func (a *App) recoverFromFailedPin(st vpn.State) {
+	if st.Status != vpn.StatusFailed {
+		return
+	}
+	s := a.Settings
+	if s.CachedGateway == "" || s.AutoScan {
+		return // nothing pinned; the failure has another cause
+	}
+	pin := s.CachedGateway
+	// Drop the pin before retrying so a second failure cannot loop here.
+	s.CachedGateway = ""
+	s.AutoScan = true
+	s.LastNode = ""
+	if err := a.SaveSettings(s); err != nil {
+		logx.Warnf("[app] clearing failed gateway pin: %v", err)
+		return
+	}
+	logx.Warnf("[app] pinned gateway %s failed; cleared the pin and rescanning", pin)
+	go func() {
+		time.Sleep(1 * time.Second)
+		if a.VPN.State().Status == vpn.StatusFailed {
+			_ = a.Connect()
+		}
+	}()
 }
 
 func (a *App) GatewayUnhealthy() {
@@ -361,12 +394,17 @@ func (a *App) RefreshExitInfo() {
 	if ip == "" {
 		ip = ipv6
 	}
-	info, err := node.GeoLookup(context.Background(), client, ip)
+	// Geo enrichment is a plain database lookup for an IP we already obtained
+	// through the tunnel: it goes direct, not through SOCKS. During protocol
+	// switches the core restarts and the SOCKS listener is briefly down, which
+	// used to fail the geo query and leave the UI without country/flag.
+	geoClient := &http.Client{Timeout: 8 * time.Second}
+	info, err := node.GeoLookup(context.Background(), geoClient, ip)
 	if err != nil {
 		// One retry: geo enrichment must never break the connection, but a
 		// transient ip-api hiccup should not leave the country empty either.
 		time.Sleep(2 * time.Second)
-		info, err = node.GeoLookup(context.Background(), client, ip)
+		info, err = node.GeoLookup(context.Background(), geoClient, ip)
 	}
 	if err != nil {
 		logx.Warnf("[app] geo lookup failed: %v", err)

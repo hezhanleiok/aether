@@ -390,7 +390,7 @@ function renderTop() {
   $('#pageTitle').textContent = tx(page);
   const v = S.vpn;
   const sub = v.status === 'Connected'
-    ? tx('connected') + ' · ' + v.protocolName + (v.exitCountry ? ' · ' + v.exitFlag + ' ' + v.exitCountry : '')
+    ? tx('connected') + ' · ' + v.protocolName + (v.exitCountry ? ' · ' + v.exitCountry : '')
     : (v.error ? v.error : coreLabel() + ' · ' + tx(page === 'home' ? 'home' : page));
   $('#pageSub').textContent = sub;
 }
@@ -623,21 +623,22 @@ function renderNodes() {
   if (!tb) return;
   const nodes = S.nodes || [];
   $('#nodeHint').textContent = S.testing ? tx('nodesTesting') + '…' : (lang === 'zh-CN'
-    ? '节点来自核心探测的 Cloudflare 边缘池；测速为真实 TCP 握手延迟，选中即固定该网关。'
-    : 'Gateways from the core-scanned Cloudflare edge pool. Latency is a real TCP handshake; selecting one pins it.');
+    ? '节点来自核心探测的 Cloudflare 边缘池；测速包含 TCP 延迟与下载速度，完成后自动固定最佳节点。'
+    : 'Gateways from the core-scanned Cloudflare edge pool. The sweep measures TCP latency and download speed, then pins the best node.');
   $('#nodeTest').disabled = S.testing;
   tb.innerHTML = '';
-  if (!nodes.length) { tb.innerHTML = `<tr><td colspan="7" class="empty">${lang === 'zh-CN' ? '暂无节点' : 'No nodes'}</td></tr>`; return; }
+  if (!nodes.length) { tb.innerHTML = `<tr><td colspan="8" class="empty">${lang === 'zh-CN' ? '暂无节点' : 'No nodes'}</td></tr>`; return; }
   for (const n of nodes) {
     const tr = el('tr');
     if (S.activeNode === n.id) tr.className = 'sel';
     const q = quality(n.latencyMs);
     const name = n.country || n.label || ('Edge ' + n.ip);
     tr.innerHTML =
-      `<td><div class="cell-main">${flagHTML(n.flag)}<div><b>${esc(name)}</b><small class="mono">${n.status === 'Connected' ? tx('nodeConnected') : esc(n.label || '')}</small></div></div></td>` +
+      `<td><div class="cell-main">${flagHTML(n.flag)}<div><b>${esc(name)}</b><small class="mono">${n.status === 'Connected' ? tx('nodeConnected') : esc(n.colo || n.label || '')}</small></div></div></td>` +
       `<td class="mono">${n.ip}</td>` +
       `<td class="mono">${n.port}</td>` +
       `<td class="ms q${q}">${n.latencyMs > 0 ? n.latencyMs + ' ms' : '—'}</td>` +
+      `<td class="mono">${n.speedBps > 0 ? fmtSpeed(n.speedBps) : '—'}</td>` +
       `<td class="mono">${n.exitIP ? esc(n.exitCountry || '') + ' ' + n.exitIP : '—'}</td>` +
       `<td><span class="badge ${n.status === 'Available' ? 'ok' : n.status === 'Connected' ? 'live' : n.status === 'Testing' ? 'warn' : 'bad'}">${badgeText(n.status)}</span></td>` +
       `<td><button class="row-act" data-id="${n.id}">${S.activeNode === n.id ? tx('selected') : tx('select')}</button></td>`;

@@ -61,11 +61,14 @@ func (a *App) ProbeNodes() {
 				defer func() { <-sem }()
 				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 				defer cancel()
-				colo, err := node.ProbeColo(ctx, n.Addr(), 6*time.Second)
+				colo, loc, err := node.ProbeColo(ctx, n.Addr(), 6*time.Second)
 				if err != nil || colo == "" {
 					return
 				}
 				a.Pool.UpdateColo(n.ID, colo)
+				if loc != "" {
+					a.Pool.UpdateLocation(n.ID, node.CountryName(loc), node.FlagFromCode(loc))
+				}
 			}(n)
 		}
 		wg.Wait()
@@ -93,9 +96,11 @@ func (a *App) ActiveNodeID() string {
 	return ""
 }
 
-// TestAllNodes measures a real TCP handshake against every node in the pool
-// and reorders the list by the measured latency. Safe to call repeatedly: a
-// second call while a sweep runs is ignored.
+// TestAllNodes measures a real TCP handshake and a download-speed sample
+// against every node in the pool, then reorders the list by the combined
+// score. When the user is on automatic gateway selection, the best node is
+// pinned so the next connection uses it. Safe to call repeatedly: a second
+// call while a sweep runs is ignored.
 func (a *App) TestAllNodes() {
 	if !testingNodes.CompareAndSwap(false, true) {
 		return
@@ -123,6 +128,13 @@ func (a *App) TestAllNodes() {
 					return
 				}
 				a.Pool.UpdateLatency(n.ID, ms, 0)
+				// Only speed-test edges that answered; the transfer is capped
+				// at 6 s so a congested edge cannot stall the whole sweep.
+				sctx, scancel := context.WithTimeout(context.Background(), 6*time.Second)
+				defer scancel()
+				if bps, serr := node.SpeedTest(sctx, n.Addr(), 6*time.Second); serr == nil && bps > 0 {
+					a.Pool.UpdateSpeed(n.ID, bps)
+				}
 			}(n)
 		}
 		wg.Wait()
@@ -130,7 +142,31 @@ func (a *App) TestAllNodes() {
 		logx.Infof("[app] node latency sweep finished")
 		// Latency and location always go together in the UI.
 		a.ProbeNodes()
+		// Report the best edge for visibility only. It must NOT be pinned as
+		// the gateway: the seed pool holds plain Cloudflare edges that answer
+		// TCP/HTTPS but are not valid tunnel endpoints, and forcing AETHER_PEER
+		// to one makes the core fail with "verify timeout" — and because the
+		// pin persists in config.json, it bricks every later connection attempt
+		// (even across restarts and protocol switches). The core's own scan on
+		// connect is the reliable selector.
+		if best := a.Pool.BestNode(); best != "" {
+			if n, ok := a.Pool.Get(best); ok {
+				logx.Infof("[app] best node: %s (%d ms, %s)", n.Addr(), n.LatencyMs, formatSpeed(n.SpeedBps))
+			}
+		}
 	}()
+}
+
+// formatSpeed renders bytes/sec as a short human string for the log line.
+func formatSpeed(bps int64) string {
+	switch {
+	case bps >= 1<<20:
+		return fmt.Sprintf("%.1f MB/s", float64(bps)/(1<<20))
+	case bps >= 1<<10:
+		return fmt.Sprintf("%.1f KB/s", float64(bps)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B/s", bps)
+	}
 }
 
 // SelectNode pins one node as the gateway for the next connection and, when a

@@ -226,10 +226,10 @@
                 <button class="btn small primary" id="nodeRescan" type="button"><svg class="mini"><use href="#i-search"/></svg>重新扫描网关</button>
               </div>
             </div>
-            <p class="hint" id="nodeHint">节点来自核心探测的 Cloudflare 边缘池；测速为真实 TCP 握手延迟。</p>
+            <p class="hint" id="nodeHint">节点来自核心探测的 Cloudflare 边缘池；测速包含 TCP 延迟与下载速度，完成后自动固定最佳节点。</p>
             <div class="table-wrap">
               <table class="table" id="nodeTable">
-                <thead><tr><th>节点</th><th>地址</th><th>端口</th><th>延迟</th><th>出口</th><th>状态</th><th></th></tr></thead>
+                <thead><tr><th>节点</th><th>地址</th><th>端口</th><th>延迟</th><th>下载速度</th><th>出口</th><th>状态</th><th></th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>

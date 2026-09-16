@@ -43,28 +43,44 @@ func LatencyQuality(ms int64) Quality {
 type Status string
 
 const (
-	StAvailable    Status = "Available"
-	StTesting      Status = "Testing"
-	StUnavailable  Status = "Unavailable"
-	StConnected    Status = "Connected"
+	StAvailable   Status = "Available"
+	StTesting     Status = "Testing"
+	StUnavailable Status = "Unavailable"
+	StConnected   Status = "Connected"
 )
 
 // Node is one edge entry in the list.
 type Node struct {
-	ID       string `json:"id"`
-	IP       string `json:"ip"`
-	Port     int    `json:"port"`
-	Label    string `json:"label"`      // "Japan", "United States", ...
-	Flag     string `json:"flag"`       // "🇯🇵"
-	Country  string `json:"country"`    // "Japan"
-	Colo     string `json:"colo"`       // Cloudflare datacentre that answered (NRT, LAX, …)
-	ExitIP   string `json:"exit_ip"`    // filled after a real connection
-	ExitCountry string `json:"exit_country"`
-	LatencyMs int64 `json:"latency_ms"` // 0 = never measured
-	TCPMs    int64 `json:"tcp_ms"`
-	HTTPSMs  int64 `json:"https_ms"`
-	Status   Status `json:"status"`
-	LastTest time.Time `json:"last_test"`
+	ID          string    `json:"id"`
+	IP          string    `json:"ip"`
+	Port        int       `json:"port"`
+	Label       string    `json:"label"`   // "Japan", "United States", ...
+	Flag        string    `json:"flag"`    // "🇯🇵"
+	Country     string    `json:"country"` // "Japan"
+	Colo        string    `json:"colo"`    // Cloudflare datacentre that answered (NRT, LAX, …)
+	ExitIP      string    `json:"exitIP"`  // filled after a real connection
+	ExitCountry string    `json:"exitCountry"`
+	LatencyMs   int64     `json:"latencyMs"` // 0 = never measured
+	TCPMs       int64     `json:"tcpMs"`
+	HTTPSMs     int64     `json:"httpsMs"`
+	SpeedBps    int64     `json:"speedBps"` // measured download throughput, 0 = untested
+	Status      Status    `json:"status"`
+	LastTest    time.Time `json:"lastTest"`
+}
+
+// Score ranks a node for auto-selection: lower is better. Latency dominates;
+// measured download speed breaks ties among similarly-fast edges. Untested
+// nodes (latency 0) sort last.
+func (n *Node) Score() int64 {
+	if n.LatencyMs <= 0 {
+		return 1 << 60
+	}
+	// Speed bonus: up to ~200 points off for a fast edge (10 MB/s ≈ full marks).
+	bonus := n.SpeedBps / 50000 // bytes/sec → points
+	if bonus > 200 {
+		bonus = 200
+	}
+	return n.LatencyMs - bonus
 }
 
 // Addr returns "ip:port".
@@ -245,6 +261,33 @@ func (p *Pool) UpdateLatency(id string, tcpMs, httpsMs int64) {
 	p.publish()
 }
 
+// UpdateSpeed stores a measured download throughput for a node.
+func (p *Pool) UpdateSpeed(id string, bps int64) {
+	p.mu.Lock()
+	if n, ok := p.nodes[id]; ok {
+		n.SpeedBps = bps
+	}
+	p.mu.Unlock()
+	p.publish()
+}
+
+// UpdateLocation records the resolved country of an edge (from the colo probe)
+// so the list can show a real flag instead of the globe placeholder.
+func (p *Pool) UpdateLocation(id, country, flag string) {
+	p.mu.Lock()
+	if n, ok := p.nodes[id]; ok {
+		if country != "" {
+			n.Country = country
+			n.Label = country
+		}
+		if flag != "" {
+			n.Flag = flag
+		}
+	}
+	p.mu.Unlock()
+	p.publish()
+}
+
 // SortByLatency reorders the visible list by measured latency (unmeasured last).
 func (p *Pool) SortByLatency() {
 	p.mu.Lock()
@@ -253,19 +296,29 @@ func (p *Pool) SortByLatency() {
 		if a == nil || b == nil {
 			return false
 		}
-		if a.LatencyMs == 0 && b.LatencyMs == 0 {
-			return a.ID < b.ID
-		}
-		if a.LatencyMs == 0 {
-			return false
-		}
-		if b.LatencyMs == 0 {
-			return true
-		}
-		return a.LatencyMs < b.LatencyMs
+		return a.Score() < b.Score()
 	})
 	p.mu.Unlock()
 	p.publish()
+}
+
+// BestNode returns the id of the highest-ranked reachable node (lowest score),
+// or "" when nothing has been measured.
+func (p *Pool) BestNode() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	best := ""
+	var bestScore int64
+	for _, id := range p.order {
+		n, ok := p.nodes[id]
+		if !ok || n.LatencyMs <= 0 {
+			continue
+		}
+		if best == "" || n.Score() < bestScore {
+			best, bestScore = id, n.Score()
+		}
+	}
+	return best
 }
 
 // TCPing measures a TCP handshake latency to ip:port.
