@@ -1,0 +1,18 @@
+{
+  "gui": {
+    "version": "1.1.0",
+    "url": "https://github.com/hezhanleiok/aether/raw/main/AetherVPN.exe",
+    "notes": "全新 UI、系统内更新、远程授权控制"
+  },
+  "core": {
+    "version": "v2.0.0",
+    "notes": "官方 Aether 核心 v2.0.0（已随本 GUI 验证兼容）"
+  },
+  "license": {
+    "enabled": true,
+    "expiry": "",
+    "trial_days": 7,
+    "message": "软件已到期，请联系作者续期",
+    "contact": "Telegram: @xiaoheok\nEmail: hezhanleiok@gmail.com"
+  }
+}

@@ -1,0 +1,7 @@
+# Sources stay on the developer machine; this repository is the release
+# channel that the GUI checks for updates and the remote license window.
+aethergui/
+Aether-HEAD/
+.codebuddy/
+tmp/
+*.log
