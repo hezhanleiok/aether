@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AetherVPN — Fast · Secure · Global</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- ── icon sprite ───────────────────────────────────────────────── -->
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 9.5 12 3l9 6.5V20a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9.5 22 9.5 13.5 14.5 13.5 14.5 22"/></symbol>
+  <symbol id="i-nodes" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><path d="M2.8 12h18.4"/><path d="M12 2.8a14.6 14.6 0 0 1 0 18.4 14.6 14.6 0 0 1 0-18.4z"/></symbol>
+  <symbol id="i-split" viewBox="0 0 24 24"><path d="M12 2.5 2.6 7 12 11.5 21.4 7z"/><polyline points="2.6 12 12 16.5 21.4 12"/><polyline points="2.6 17 12 21.5 21.4 17"/></symbol>
+  <symbol id="i-rules" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.2 5.6 4.9 7.3 7.6 4.2"/><path d="M3.2 11.6 4.9 13.3 7.6 10.2"/><path d="M3.2 17.6 4.9 19.3 7.6 16.2"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.2 14.4a1.6 1.6 0 0 0 .32 1.77l.06.06a1.9 1.9 0 1 1-2.69 2.69l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-.97 1.47V20a1.9 1.9 0 0 1-3.8 0v-.1a1.6 1.6 0 0 0-1.05-1.47 1.6 1.6 0 0 0-1.77.32l-.06.06a1.9 1.9 0 1 1-2.69-2.69l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-.97H4a1.9 1.9 0 0 1 0-3.8h.1a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a1.9 1.9 0 1 1 2.69-2.69l.06.06a1.6 1.6 0 0 0 1.77.32H9.6a1.6 1.6 0 0 0 .97-1.47V4a1.9 1.9 0 0 1 3.8 0v.1a1.6 1.6 0 0 0 .97 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a1.9 1.9 0 1 1 2.69 2.69l-.06.06a1.6 1.6 0 0 0-.32 1.77V9.6a1.6 1.6 0 0 0 1.47.97H20a1.9 1.9 0 0 1 0 3.8h-.1a1.6 1.6 0 0 0-1.47.97z"/></symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24"><path d="M14 2.6H6.6a2 2 0 0 0-2 2v14.8a2 2 0 0 0 2 2h10.8a2 2 0 0 0 2-2V8z"/><polyline points="14 2.6 14 8 19.4 8"/><path d="M8.2 13.4h7.4M8.2 17.2h5"/></symbol>
+  <symbol id="i-about" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.3"/><path d="M12 16.4v-4.6M12 8.2v.1"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2.6v8.8"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13.2 2.4 4 13.8h5.8L9 21.6l9.2-11.4h-5.8z"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><polyline points="16.6 2.4 21 6.8 16.6 11.2"/><path d="M3 12.4v-2a4 4 0 0 1 4-4h14"/><polyline points="7.4 21.6 3 17.2 7.4 12.8"/><path d="M21 11.6v2a4 4 0 0 1-4 4H3"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><polyline points="22 12 17.6 12 14.6 20.4 9.4 3.6 6.4 12 2 12"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><path d="M13.8 2.6H6.6a2 2 0 0 0-2 2v14.8a2 2 0 0 0 2 2h10.8a2 2 0 0 0 2-2V8z"/><path d="M8.4 12.8h7.2M8.4 16.8h4.4"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15.4v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7.4 10.2 12 14.8 16.6 10.2"/><path d="M12 14.8V3.2"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15.4v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="16.6 7.8 12 3.2 7.4 7.8"/><path d="M12 3.2v11.6"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.3"/><polyline points="12 6.6 12 12.2 16.2 14.4"/></symbol>
+  <symbol id="i-total" viewBox="0 0 24 24"><path d="M21.1 15.9A9.3 9.3 0 1 1 8.1 2.9"/><path d="M21.9 12A9.3 9.3 0 0 0 12 2.7V12z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><polyline points="22.4 4.6 22.4 10.2 16.8 10.2"/><polyline points="1.6 19.4 1.6 13.8 7.2 13.8"/><path d="M3.9 9a9.2 9.2 0 0 1 14.9-3.4L22.4 10.2M1.6 13.8l3.6 3.4A9.2 9.2 0 0 0 20.1 15"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7.3"/><path d="M20.6 20.6 16.2 16.2"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><polyline points="3.4 6.4 20.6 6.4"/><path d="M18.6 6.4v14a2 2 0 0 1-2 2H7.4a2 2 0 0 1-2-2v-14M9.4 6.4V4.2a1.8 1.8 0 0 1 1.8-1.8h1.6a1.8 1.8 0 0 1 1.8 1.8V6.4"/><path d="M10.2 11v6M13.8 11v6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><polyline points="20 6.4 9.2 17.2 4 12"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.6" y="8.6" width="12.8" height="12.8" rx="2.4"/><path d="M15.4 5.6V5a2 2 0 0 0-2-2H4.6a2 2 0 0 0-2 2v8.8a2 2 0 0 0 2 2H5"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M18 13.6v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15.2 3.2 21.2 3.2 21.2 9.2"/><path d="M9.6 14.4 21.2 3.2"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 1.6v2.6M12 19.8v2.6M4.6 4.6l1.9 1.9M17.5 17.5l1.9 1.9M1.6 12h2.6M19.8 12h2.6M4.6 19.4l1.9-1.9M17.5 6.5l1.9-1.9"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9.2 9.2 0 1 1 11.2 3a7.2 7.2 0 0 0 9.8 9.8z"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8.2-4 8.2-10V5.4L12 2.2 3.8 5.4V12c0 6 8.2 10 8.2 10z"/><polyline points="8.8 11.8 11 14 15.4 9.4"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.2" y="10.4" width="15.6" height="11" rx="2.4"/><path d="M7.6 10.4V7.2a4.4 4.4 0 0 1 8.8 0v3.2"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="2.4" y="3.2" width="19.2" height="7.2" rx="2"/><rect x="2.4" y="13.6" width="19.2" height="7.2" rx="2"/><path d="M6.6 6.8h.1M6.6 17.2h.1"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 24 24"><path d="M4.4 21.6V3.2h15l-3 4.4 3 4.4h-15"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M21 10.4c0 6.2-5.2 10.4-9 10.4S3 16.6 3 10.4a9 9 0 0 1 18 0z"/><circle cx="12" cy="10.2" r="3"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6.4 3.6 19.6 12 6.4 20.4z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5.6" y="5.6" width="12.8" height="12.8" rx="2.4"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.6a2 2 0 0 1 2-2h4.2l2 2.6H19a2 2 0 0 1 2 2v8.4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M5 12.6a10 10 0 0 1 14 0"/><path d="M8.5 16a5.4 5.4 0 0 1 7 0"/><circle cx="12" cy="20" r="1"/><path d="M1.8 9.2a15 15 0 0 1 20.4 0"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="b-github" viewBox="0 0 24 24"><path fill="#181717" d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></symbol>
+  <symbol id="b-telegram" viewBox="0 0 24 24"><path fill="#229ED9" d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></symbol>
+  <symbol id="b-mail" viewBox="0 0 52 40"><path fill="#4285f4" d="M3.64 40h8.72V18.18L0 8.64v27.72C0 38.37 1.63 40 3.64 40z"/><path fill="#34a853" d="M39.64 40h8.72c2.01 0 3.64-1.63 3.64-3.64V8.64l-12.36 9.54V40z"/><path fill="#fbbc04" d="M39.64 3.64v14.54L52 8.64V5.45c0-4.05-4.62-6.35-7.85-3.93l-4.51 3.12z"/><path fill="#ea4335" d="M12.36 18.18V3.64L26 14.09 39.64 3.64v14.54L26 28.73z"/><path fill="#c5221f" d="M0 5.45v3.19l12.36 9.54V3.64L7.85.52C4.62-1.9 0 .4 0 5.45z"/></symbol>
+</svg>
+
+<div class="app">
+
+  <!-- ── sidebar ──────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark"><svg><use href="#i-play"/></svg></span>
+      <span class="brand-text">
+        <strong>AetherVPN</strong>
+        <small>Fast · Secure · Global</small>
+      </span>
+    </div>
+
+    <nav class="nav" id="nav"></nav>
+
+    <div class="sidebar-foot">
+      <button class="core-card" id="coreCard" type="button">
+        <span class="core-dot" id="coreDot"></span>
+        <span class="core-lines">
+          <strong id="coreState">检测核心…</strong>
+          <small id="coreVer">—</small>
+        </span>
+        <svg class="mini"><use href="#i-chev"/></svg>
+      </button>
+      <button class="about-link" data-page="about" type="button">
+        <svg class="mini"><use href="#i-about"/></svg><span>关于</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ── main ─────────────────────────────────────────────────────── -->
+  <main class="main">
+    <header class="topbar">
+      <div class="tb-left">
+        <h2 id="pageTitle">首页</h2>
+        <p id="pageSub">—</p>
+      </div>
+      <div class="tb-right">
+        <span class="pill" id="topCore"><i class="dot"></i>核心: <b id="topCoreVer">—</b></span>
+        <button class="icon-btn" id="btnTheme" type="button" title="切换主题"><svg><use href="#i-moon"/></svg></button>
+        <button class="icon-btn" id="btnSettings" type="button" title="设置"><svg><use href="#i-settings"/></svg></button>
+      </div>
+    </header>
+
+    <div class="pages" id="pages">
+
+      <!-- ══ 首页 ══════════════════════════════════════════════════ -->
+      <section class="page active" data-page="home">
+        <div class="home-grid">
+          <div class="col-main">
+
+            <!-- 连接卡 -->
+            <div class="card hero-card">
+              <div class="hero-left">
+                <div class="power-wrap">
+                  <span class="ring ring-3"></span>
+                  <span class="ring ring-2"></span>
+                  <button class="power" id="powerBtn" type="button" aria-label="连接">
+                    <svg><use href="#i-power"/></svg>
+                  </button>
+                </div>
+                <div class="hero-status">
+                  <span class="status-line"><i class="dot" id="heroDot"></i><b id="heroWord">未连接</b></span>
+                  <span class="hero-time" id="heroTime">00:00:00</span>
+                </div>
+                <p class="hero-hint" id="heroHint">点击下方按钮开始安全加速</p>
+              </div>
+
+              <div class="hero-right">
+                <div class="node-head">
+                  <span class="flag" id="nodeFlag">🌐</span>
+                  <span class="node-id">
+                    <b id="nodeName">自动最佳节点</b>
+                    <small id="nodeProto">—</small>
+                  </span>
+                  <span class="bars" id="nodeBars"></span>
+                  <span class="node-ms" id="nodeMs">—</span>
+                </div>
+                <div class="kv-list">
+                  <div class="kv"><span id="ipLabel">本地 IP</span><b id="ipVal">—</b></div>
+                  <div class="kv"><span>协议</span><b id="protoVal">—</b></div>
+                  <div class="kv"><span>节点延迟</span><b id="latVal">—</b></div>
+                  <div class="kv">
+                    <span>上传 / 下载</span>
+                    <b class="pair"><i class="up">↑ <em id="upVal">0 KB/s</em></i><i class="down">↓ <em id="downVal">0 KB/s</em></i></b>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 实时流量 -->
+            <div class="card chart-card">
+              <div class="card-head">
+                <span class="title"><svg class="mini accent"><use href="#i-chart"/></svg>实时流量</span>
+                <div class="seg" id="rangeSeg">
+                  <button type="button" data-range="1m" class="on">1分钟</button>
+                  <button type="button" data-range="5m">5分钟</button>
+                  <button type="button" data-range="1h">1小时</button>
+                  <button type="button" data-range="1d">1天</button>
+                </div>
+              </div>
+              <div class="chart-box"><canvas id="chart"></canvas></div>
+              <div class="legend">
+                <span><i class="sw sw-down"></i>下载 <b id="lgDown">0 KB/s</b></span>
+                <span><i class="sw sw-up"></i>上传 <b id="lgUp">0 KB/s</b></span>
+              </div>
+            </div>
+
+            <!-- 统计 -->
+            <div class="stats" id="stats">
+              <button class="card stat" type="button" data-page="nodes">
+                <span class="stat-ico blue"><svg><use href="#i-total"/></svg></span>
+                <span class="stat-body"><span>总流量</span><b id="stTotal">0.00 MB</b></span>
+                <svg class="mini chev"><use href="#i-chev"/></svg>
+              </button>
+              <button class="card stat" type="button" data-page="nodes">
+                <span class="stat-ico green"><svg><use href="#i-download"/></svg></span>
+                <span class="stat-body"><span>下载流量</span><b id="stDown">0.00 MB</b></span>
+                <svg class="mini chev"><use href="#i-chev"/></svg>
+              </button>
+              <button class="card stat" type="button" data-page="nodes">
+                <span class="stat-ico violet"><svg><use href="#i-upload"/></svg></span>
+                <span class="stat-body"><span>上传流量</span><b id="stUp">0.00 MB</b></span>
+                <svg class="mini chev"><use href="#i-chev"/></svg>
+              </button>
+              <button class="card stat" type="button" data-page="logs">
+                <span class="stat-ico cyan"><svg><use href="#i-clock"/></svg></span>
+                <span class="stat-body"><span>在线时长</span><b id="stDuration">00:00:00</b></span>
+                <svg class="mini chev"><use href="#i-chev"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="col-side">
+            <!-- 协议切换 -->
+            <div class="card">
+              <div class="card-head">
+                <span class="title"><svg class="mini accent"><use href="#i-swap"/></svg>协议切换</span>
+                <span class="tag" id="protoApplying" hidden>切换中…</span>
+              </div>
+              <label class="field">
+                <span>当前协议</span>
+                <select id="protoSelect"></select>
+              </label>
+              <div class="proto-grid" id="protoGrid"></div>
+            </div>
+
+            <!-- 快捷操作 -->
+            <div class="card">
+              <div class="card-head"><span class="title"><svg class="mini warn"><use href="#i-bolt"/></svg>快捷操作</span></div>
+              <div class="quick-grid">
+                <button class="btn primary" id="qaNodes" type="button"><svg class="mini"><use href="#i-nodes"/></svg>切换节点</button>
+                <button class="btn" id="qaRefresh" type="button"><svg class="mini"><use href="#i-refresh"/></svg>刷新延迟</button>
+              </div>
+            </div>
+
+            <!-- 最近日志 -->
+            <div class="card log-card">
+              <div class="card-head">
+                <span class="title"><svg class="mini"><use href="#i-doc"/></svg>最近日志</span>
+                <button class="link" id="qaLogs" type="button">更多<svg class="mini"><use href="#i-chev"/></svg></button>
+              </div>
+              <ul class="log-list" id="recentLogs"></ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══ 节点 ══════════════════════════════════════════════════ -->
+      <section class="page" data-page="nodes">
+        <div class="stack">
+          <div class="card">
+            <div class="card-head">
+              <span class="title"><svg class="mini accent"><use href="#i-nodes"/></svg>节点列表</span>
+              <div class="head-actions">
+                <button class="btn small" id="nodeTest" type="button"><svg class="mini"><use href="#i-refresh"/></svg>测速全部节点</button>
+                <button class="btn small" id="nodeAuto" type="button"><svg class="mini"><use href="#i-pin"/></svg>自动最佳</button>
+                <button class="btn small primary" id="nodeRescan" type="button"><svg class="mini"><use href="#i-search"/></svg>重新扫描网关</button>
+              </div>
+            </div>
+            <p class="hint" id="nodeHint">节点来自核心探测的 Cloudflare 边缘池；测速包含 TCP 延迟与下载速度，完成后自动固定最佳节点。</p>
+            <div class="table-wrap">
+              <table class="table" id="nodeTable">
+                <thead><tr><th>节点</th><th>地址</th><th>端口</th><th>延迟</th><th>下载速度</th><th>出口</th><th>状态</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══ 分流 ══════════════════════════════════════════════════ -->
+      <section class="page" data-page="split">
+        <div class="stack">
+          <div class="card">
+            <div class="card-head"><span class="title"><svg class="mini accent"><use href="#i-split"/></svg>连接方式</span></div>
+            <div class="mode-grid" id="modeGrid"></div>
+            <p class="hint" id="modeHint">切换后立即生效（会重连）。</p>
+          </div>
+          <div class="card">
+            <div class="card-head"><span class="title"><svg class="mini"><use href="#i-lock"/></svg>Windows 接管</span></div>
+            <div class="kv-list wide">
+              <div class="kv"><span>系统代理</span><b id="sysProxyVal">—</b></div>
+              <div class="kv"><span>Kill Switch</span><b id="ksVal">—</b></div>
+              <div class="kv"><span>局域网放行</span><b id="lanVal">—</b></div>
+              <div class="kv"><span>PAC 分流文件</span><b class="mono" id="pacVal">—</b></div>
+            </div>
+            <div class="head-actions mt">
+              <button class="btn small" id="btnSysProxyOff" type="button">释放系统代理</button>
+              <button class="btn small" id="btnKsToggle" type="button">切换 Kill Switch</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══ 规则 ══════════════════════════════════════════════════ -->
+      <section class="page" data-page="rules">
+        <div class="stack">
+          <div class="card">
+            <div class="card-head"><span class="title"><svg class="mini accent"><use href="#i-rules"/></svg>规则语法</span></div>
+            <ul class="syntax">
+              <li><code>example.com</code>域名及其子域名</li>
+              <li><code>*.example.com</code>仅匹配二级及以下子域名</li>
+              <li><code>keyword:foo</code>包含关键词</li>
+              <li><code>regexp:^a.*\.cn$</code>正则表达式</li>
+              <li><code>full:cdn.example.com</code>完全相等</li>
+              <li><code>192.168.0.0/16</code>CIDR 网段</li>
+              <li><code>private</code>全部私有地址</li>
+            </ul>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <span class="title"><svg class="mini danger"><use href="#i-lock"/></svg>屏蔽规则</span>
+              <span class="tag">禁止访问网络</span>
+            </div>
+            <textarea id="editBlock" spellcheck="false" placeholder="每行一条规则"></textarea>
+            <div class="head-actions mt end">
+              <button class="btn small primary" id="saveRules" type="button"><svg class="mini"><use href="#i-check"/></svg>保存规则</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <span class="title"><svg class="mini green"><use href="#i-flag"/></svg>直连规则</span>
+              <span class="tag">绕过隧道</span>
+            </div>
+            <textarea id="editDirect" spellcheck="false" placeholder="每行一条规则"></textarea>
+            <div class="head-actions mt end">
+              <button class="btn small" id="addCommon" type="button"><svg class="mini"><use href="#i-plus"/></svg>加入常用国内站点</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══ 设置 ══════════════════════════════════════════════════ -->
+      <section class="page" data-page="settings">
+        <div class="stack" id="settingsPage"></div>
+      </section>
+
+      <!-- ══ 日志 ══════════════════════════════════════════════════ -->
+      <section class="page" data-page="logs">
+        <div class="stack">
+          <div class="card log-page-card">
+            <div class="card-head">
+              <span class="title"><svg class="mini accent"><use href="#i-logs"/></svg>运行日志</span>
+              <div class="head-actions">
+                <div class="seg small" id="logLevelSeg">
+                  <button type="button" data-level="all" class="on">全部</button>
+                  <button type="button" data-level="INFO">信息</button>
+                  <button type="button" data-level="WARN">警告</button>
+                  <button type="button" data-level="ERROR">错误</button>
+                </div>
+                <label class="search"><svg class="mini"><use href="#i-search"/></svg><input id="logSearch" placeholder="搜索…"></label>
+                <button class="btn small" id="logCopy" type="button"><svg class="mini"><use href="#i-copy"/></svg>复制</button>
+                <button class="btn small" id="logClear" type="button"><svg class="mini"><use href="#i-trash"/></svg>清空</button>
+              </div>
+            </div>
+            <div class="log-scroll" id="logScroll"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══ 关于 ══════════════════════════════════════════════════ -->
+      <section class="page" data-page="about">
+        <div class="stack">
+          <div class="card about-card">
+            <span class="about-mark"><svg><use href="#i-shield"/></svg></span>
+            <h3>AetherVPN</h3>
+            <p class="about-desc">作者 xiaohe · Better Connection, A Wider World</p>
+            <div class="kv-list wide">
+              <div class="kv"><span>作者</span><b>xiaohe</b></div>
+              <div class="kv"><span>GUI 版本</span><b id="abGui">—</b></div>
+              <div class="kv"><span>Core 版本</span><b id="abCore">—</b></div>
+              <div class="kv"><span>后端</span><b id="abBackend">—</b></div>
+              <div class="kv"><span>授权状态</span><b id="abExpiry">—</b></div>
+            </div>
+            <div class="about-links">
+              <button class="btn small" type="button" data-url="https://github.com/hezhanleiok"><svg class="brand"><use href="#b-github"/></svg>GitHub 主页</button>
+              <button class="btn small" type="button" data-url="https://github.com/hezhanleiok/aether"><svg class="brand"><use href="#b-github"/></svg>项目主页</button>
+              <button class="btn small" type="button" data-url="https://t.me/xiaoheok"><svg class="brand"><use href="#b-telegram"/></svg>Telegram</button>
+              <button class="btn small" type="button" data-url="mailto:hezhanleiok@gmail.com"><svg class="brand mail"><use href="#b-mail"/></svg>Email</button>
+              <button class="btn small primary" id="abCheckUpdate" type="button"><svg class="mini"><use href="#i-download"/></svg>检查更新</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <footer class="footer">
+      <span>AetherVPN · by xiaohe</span>
+      <span>github.com/hezhanleiok/aether</span>
+    </footer>
+  </main>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<div class="modal-mask" id="modalMask" hidden>
+  <div class="modal" id="modalBox"></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
