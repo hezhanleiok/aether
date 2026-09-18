@@ -1,4 +1,4 @@
-## AetherVPN v{version}
+## AetherVPN v1.1.0
 
 > 基于 [Aether](https://github.com/CluvexStudio/Aether) 核心构建的 Windows 图形客户端。
 
@@ -6,8 +6,8 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `AetherVPN-{version}-win-x64.zip` | 便携版：解压后双击 `AetherVPN.exe` 即可运行 |
-| `AetherVPN-Setup-{version}.exe` | 安装版：安装完成后自动创建桌面快捷方式 |
+| `AetherVPN-1.1.0-win-x64.zip` | 便携版：解压后双击 `AetherVPN.exe` 即可运行 |
+| `AetherVPN-Setup-1.1.0.exe` | 安装版：安装完成后自动创建桌面快捷方式 |
 
 两个版本均自带配套的 Aether 核心，无需另行下载。
 
