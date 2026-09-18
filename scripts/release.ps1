@@ -75,9 +75,13 @@ try {
     $proxy = "http://127.0.0.1:10808"
     $hdr = @{ Authorization = "Bearer $Token"; Accept = "application/vnd.github+json" }
 
+    # Send UTF-8 bytes explicitly: PowerShell 5.1 would otherwise encode the
+    # body with the system ANSI codepage and every Chinese character in the
+    # release notes would arrive on GitHub as '?'.
+    $body = (@{ tag_name = "v$Version"; name = "AetherVPN v$Version"; body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json)
     $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/hezhanleiok/aether/releases" `
-        -Method Post -Headers $hdr -Proxy $proxy -ContentType "application/json" `
-        -Body (@{ tag_name = "v$Version"; name = "AetherVPN v$Version"; body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json)
+        -Method Post -Headers $hdr -Proxy $proxy -ContentType "application/json; charset=utf-8" `
+        -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
 
     foreach ($f in @("AetherVPN-$Version-win-x64.zip", "AetherVPN-Setup-$Version.exe")) {
         $p = Join-Path $build $f
