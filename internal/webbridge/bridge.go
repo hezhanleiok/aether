@@ -173,8 +173,9 @@ func (b *Bridge) Handler() http.Handler {
 	mux.HandleFunc("/api/window/hide", b.guard(b.windowHide))
 	mux.HandleFunc("/api/window/quit", b.guard(b.windowQuit))
 	mux.HandleFunc("/api/update/check", b.guard(b.updateCheck))
+	// /api/update/gui installs a whole bundle (GUI + core). The core has no
+	// endpoint of its own by design: it can only ever move with the GUI.
 	mux.HandleFunc("/api/update/gui", b.guard(b.updateGUI))
-	mux.HandleFunc("/api/update/core", b.guard(b.updateCore))
 	mux.HandleFunc("/", b.static)
 	return mux
 }
@@ -627,12 +628,13 @@ func (b *Bridge) updateCheck(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// updateGUI installs a new GUI in place: download, swap through a batch
-// script, relaunch. The browser is never opened.
+// updateGUI installs a release bundle — GUI and its bundled core swapped in
+// together, then relaunched. The browser is never opened, and the core is
+// never updated separately.
 func (b *Bridge) updateGUI(w http.ResponseWriter, _ *http.Request) {
 	info := b.updateState()
 	if info == nil || !info.GUIHas || info.GUIURL == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "没有可用的 GUI 更新"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "没有可用的更新"})
 		return
 	}
 	exe, err := os.Executable()
@@ -640,44 +642,19 @@ func (b *Bridge) updateGUI(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	if err := updater.ApplyGUI(info.GUIURL, exe); err != nil {
+	if err := updater.ApplyBundle(info.GUIURL, exe, b.app.Core.Path()); err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	logx.Infof("[update] GUI %s staged; restarting to swap it in", info.GUIVer)
+	logx.Infof("[update] bundle %s staged; swapping GUI and core together", info.GUIVer)
+	// The core keeps its own exe open, so it must let go before the batch
+	// script can move the new binary in.
+	if err := b.app.Core.Stop(); err != nil {
+		logx.Warnf("[update] stop core: %v", err)
+	}
 	if b.onQuit != nil {
 		go b.onQuit()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// updateCore installs the pinned core release only — never an upstream
-// version this GUI was not validated against.
-func (b *Bridge) updateCore(w http.ResponseWriter, _ *http.Request) {
-	info := b.updateState()
-	if info == nil || !info.CoreHas || info.CoreURL == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "没有可用的核心更新"})
-		return
-	}
-	corePath := b.app.Core.Path()
-	if corePath == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "未找到核心路径"})
-		return
-	}
-	if err := updater.ApplyCore(info.CoreURL, corePath); err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	go func() {
-		if err := b.app.Core.Stop(); err != nil {
-			logx.Warnf("[update] stop core: %v", err)
-		}
-		if err := os.Rename(corePath+".new", corePath); err != nil {
-			logx.Warnf("[update] swap core: %v", err)
-			return
-		}
-		logx.Infof("[update] core updated to %s", info.CoreVer)
-	}()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

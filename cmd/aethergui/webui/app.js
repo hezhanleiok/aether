@@ -920,20 +920,27 @@ function showExpired(lic) {
 
 // Updates are applied in place — the download never leaves the app.
 function showUpdateDialog(u) {
-  const row = (name, cur, next, has) => `
-    <div class="up-row">
-      <span class="up-info"><b>${name}</b><small>${cur}${has ? ' → ' + next : ''}</small></span>
-      <span class="up-badge ${has ? 'new' : ''}">${has ? '有新版本' : '已是最新'}</span>
-    </div>`;
   const notes = [u.gui_notes, u.core_notes].filter(Boolean).join('\n');
   showModal(`
     <h3>检查更新</h3>
-    ${row('GUI 客户端', guiVer(), u.gui_version || '', u.gui_has)}
-    ${row('Aether 核心', coreVer(), u.core_version || '', u.core_has)}
+    <div class="up-row">
+      <span class="up-info">
+        <b>更新包（GUI + 核心）</b>
+        <small>${guiVer()}${u.gui_has ? ' → ' + (u.gui_version || '') : ''}</small>
+      </span>
+      <span class="up-badge ${u.gui_has ? 'new' : ''}">${u.gui_has ? '有新版本' : '已是最新'}</span>
+    </div>
+    <div class="up-row">
+      <span class="up-info">
+        <b>包内核心版本</b>
+        <small>${u.core_version || '—'}${u.gui_has ? '（随包一起更新）' : ''}</small>
+      </span>
+      <span class="up-badge">随 GUI 同步</span>
+    </div>
     ${notes ? `<div class="up-notes">${esc(notes)}</div>` : ''}
     <div class="modal-act">
       <button class="btn" id="upClose" type="button">关闭</button>
-      ${u.gui_has || u.core_has ? '<button class="btn primary" id="upApply" type="button">立即更新</button>' : ''}
+      ${u.gui_has ? '<button class="btn primary" id="upApply" type="button">立即更新</button>' : ''}
     </div>
   `);
   $('#upClose').onclick = closeModal;
@@ -942,8 +949,7 @@ function showUpdateDialog(u) {
     apply.onclick = async () => {
       apply.disabled = true;
       apply.textContent = '正在下载并更新…';
-      if (u.gui_has) await api('/api/update/gui');
-      else if (u.core_has) await api('/api/update/core');
+      await api('/api/update/gui');
     };
   }
 }

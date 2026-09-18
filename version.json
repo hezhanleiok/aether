@@ -1,12 +1,12 @@
 {
   "gui": {
     "version": "1.1.0",
-    "url": "https://github.com/hezhanleiok/aether/raw/main/AetherVPN.exe",
-    "notes": "全新 UI、系统内更新、远程授权控制"
+    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.0/AetherVPN-1.1.0-win-x64.zip",
+    "notes": "首个 Release 版本：便携版 + 安装版，GUI 与核心捆绑更新"
   },
   "core": {
     "version": "v2.0.0",
-    "notes": "官方 Aether 核心 v2.0.0（已随本 GUI 验证兼容）"
+    "notes": "官方 Aether 核心 v2.0.0，随更新包一同分发"
   },
   "license": {
     "enabled": true,

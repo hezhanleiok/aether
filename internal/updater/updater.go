@@ -64,14 +64,16 @@ type Manifest struct {
 }
 
 // UpdateInfo is the result of one check, sent to the UI.
+//
+// There is deliberately no "core update available" flag: the core ships
+// inside the GUI bundle and is only ever swapped together with it, so it can
+// never run ahead of the UI that drives it.
 type UpdateInfo struct {
 	GUIHas    bool   `json:"gui_has"`
 	GUIVer    string `json:"gui_version"`
 	GUIURL    string `json:"gui_url"`
 	GUINotes  string `json:"gui_notes"`
-	CoreHas   bool   `json:"core_has"`
 	CoreVer   string `json:"core_version"`
-	CoreURL   string `json:"core_url"`
 	CoreNotes string `json:"core_notes"`
 	CheckedAt string `json:"checked_at"`
 	Error     string `json:"error,omitempty"`
@@ -208,54 +210,12 @@ func Check(guiVer, coreVer string) *UpdateInfo {
 		info.GUINotes = m.GUI.Notes
 	}
 
-	// The core follows the pinned release only. An upstream core newer than
-	// the GUI was validated against is deliberately left alone, so GUI and
-	// core can never drift out of sync.
-	if m.Core.Version != "" && newer(m.Core.Version, coreVer) {
-		if dl, err := fetchCoreAssetURL(m.Core.Version); err == nil && dl != "" {
-			info.CoreHas = true
-			info.CoreVer = m.Core.Version
-			info.CoreURL = dl
-			info.CoreNotes = m.Core.Notes
-		}
-	}
+	// The core is never updated on its own: it ships inside the same bundle
+	// as the GUI, so a core can never run ahead of the UI that drives it.
+	// These two fields are informational — they describe what comes inside.
+	info.CoreVer = m.Core.Version
+	info.CoreNotes = m.Core.Notes
 	return info
-}
-
-// fetchCoreAssetURL returns the Windows archive of one official release tag.
-func fetchCoreAssetURL(tag string) (string, error) {
-	req, err := http.NewRequest("GET", CoreReleaseAPI+"/tags/"+tag, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "AetherVPN")
-
-	resp, err := client(20 * time.Second).Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("core release %s: http %d", tag, resp.StatusCode)
-	}
-
-	var r struct {
-		Assets []struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
-		} `json:"assets"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return "", err
-	}
-	for _, a := range r.Assets {
-		n := strings.ToLower(a.Name)
-		if strings.Contains(n, "windows") && strings.HasSuffix(n, ".zip") {
-			return a.URL, nil
-		}
-	}
-	return "", nil
 }
 
 // firstRun records (once) when this installation was first started, so a
@@ -353,61 +313,92 @@ func download(rawURL, dest string) error {
 
 // ApplyGUI downloads the new GUI binary next to the running one and hands the
 // swap to a batch script: a running exe cannot overwrite itself.
-func ApplyGUI(dlURL, exePath string) error {
+// ApplyBundle installs one release bundle.
+//
+// A bundle is a zip holding the GUI exe plus its matching core under
+// core-bin/. Both are staged and swapped together by a batch script once
+// this process exits: shipping them as one unit is what keeps a newer core
+// from ever landing under an older UI.
+func ApplyBundle(dlURL, exePath, corePath string) error {
 	if dlURL == "" {
 		return fmt.Errorf("no download url in the manifest")
 	}
-	newPath := exePath + ".new"
-	if err := download(dlURL, newPath); err != nil {
-		return err
-	}
-	bat := filepath.Join(filepath.Dir(exePath), "aether-update.bat")
-	script := "@echo off\r\n" +
-		"ping -n 3 127.0.0.1 >nul\r\n" +
-		"move /Y \"" + newPath + "\" \"" + exePath + "\"\r\n" +
-		"start \"\" \"" + exePath + "\"\r\n" +
-		"del \"%~f0\"\r\n"
-	if err := os.WriteFile(bat, []byte(script), 0o644); err != nil {
-		return err
-	}
-	return exec.Command("cmd", "/c", "start", "", "/min", bat).Start()
-}
-
-// ApplyCore downloads the official Windows archive and extracts the core exe
-// to corePath+".new"; the caller stops the core, swaps it in and restarts.
-func ApplyCore(dlURL, corePath string) error {
-	if dlURL == "" {
-		return fmt.Errorf("no core download url")
-	}
-	zipPath := corePath + ".zip"
+	dir := filepath.Dir(exePath)
+	zipPath := filepath.Join(dir, "aether-update.zip")
 	if err := download(dlURL, zipPath); err != nil {
 		return err
 	}
 	defer os.Remove(zipPath)
 
-	r, err := zip.OpenReader(zipPath)
+	guiTmp, coreTmp, err := stageBundle(zipPath, dir)
 	if err != nil {
 		return err
+	}
+
+	var b strings.Builder
+	b.WriteString("@echo off\r\n")
+	b.WriteString("ping -n 3 127.0.0.1 >nul\r\n")
+	b.WriteString("move /Y \"" + guiTmp + "\" \"" + exePath + "\"\r\n")
+	if coreTmp != "" && corePath != "" {
+		b.WriteString("move /Y \"" + coreTmp + "\" \"" + corePath + "\"\r\n")
+	}
+	b.WriteString("start \"\" \"" + exePath + "\"\r\n")
+	b.WriteString("del \"%~f0\"\r\n")
+
+	bat := filepath.Join(dir, "aether-update.bat")
+	if err := os.WriteFile(bat, []byte(b.String()), 0o644); err != nil {
+		return err
+	}
+	return exec.Command("cmd", "/c", "start", "", "/min", bat).Start()
+}
+
+// stageBundle unpacks the GUI and the bundled core out of a release bundle.
+// Either may be missing from the archive; the GUI never may.
+func stageBundle(zipPath, dir string) (guiTmp, coreTmp string, err error) {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return "", "", err
 	}
 	defer r.Close()
 
 	for _, f := range r.File {
-		if f.FileInfo().IsDir() || !strings.HasSuffix(strings.ToLower(f.Name), ".exe") {
+		if f.FileInfo().IsDir() {
 			continue
 		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
+		name := strings.ToLower(filepath.ToSlash(f.Name))
+		if !strings.HasSuffix(name, ".exe") {
+			continue
 		}
-		out, err := os.Create(corePath + ".new")
-		if err != nil {
-			rc.Close()
-			return err
+		dst := filepath.Join(dir, "aether-gui.new")
+		if strings.Contains(name, "core-bin/") {
+			dst = filepath.Join(dir, "aether-core.new")
+			coreTmp = dst
+		} else {
+			guiTmp = dst
 		}
-		_, err = io.Copy(out, rc)
-		out.Close()
-		rc.Close()
+		if err := extractZipFile(f, dst); err != nil {
+			return "", "", err
+		}
+	}
+	if guiTmp == "" {
+		return "", "", fmt.Errorf("bundle contains no GUI executable")
+	}
+	return guiTmp, coreTmp, nil
+}
+
+func extractZipFile(f *zip.File, dst string) error {
+	rc, err := f.Open()
+	if err != nil {
 		return err
 	}
-	return fmt.Errorf("no exe inside the core archive")
+	defer rc.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, rc); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
