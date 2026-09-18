@@ -115,12 +115,13 @@ func doInstall(dir string) error {
 
 	total := len(zr.File)
 	for i, f := range zr.File {
-		// Strip the bundle's top-level folder so the exe lands in dir root.
-		name := stripTop(f.Name)
-		if name == "" || strings.HasSuffix(name, "/") {
+		// The bundle is flat: AetherVPN.exe plus core-bin/aether.exe, already
+		// at the archive root, so entries are used as they are.
+		name := filepath.FromSlash(f.Name)
+		if name == "" || strings.HasSuffix(name, "/") || strings.Contains(name, "..") {
 			continue
 		}
-		dst := filepath.Join(dir, filepath.FromSlash(name))
+		dst := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
@@ -143,14 +144,6 @@ func doInstall(dir string) error {
 	}
 	setProgress(98, "正在完成…")
 	return nil
-}
-
-func stripTop(name string) string {
-	name = strings.ReplaceAll(name, "\\", "/")
-	if i := strings.Index(name, "/"); i >= 0 {
-		return name[i+1:]
-	}
-	return name
 }
 
 func writeZipFile(f *zip.File, dst string) error {

@@ -32,19 +32,10 @@
   - 由 **xiaohe** 开发并发布
   - 采用**试用授权**：自首次启动起可免费试用 **7 天**
   - 到期后软件将提示续期，授权状态与到期时间由本仓库的 `version.json` 远程控制
-  - 续期或获取授权请联系作者（见下方联系方式）
+  - 续期请联系作者
 - **Aether 核心**
   - 本软件内置的是 [Aether](https://github.com/CluvexStudio/Aether) 核心二进制文件
   - 该核心的版权与许可证归原作者 **CluvexStudio** 所有，本项目仅作调用与随包分发
   - 核心更新始终与 GUI 版本配套发布，不会单独变更
 - 请遵守所在地法律法规，以及所访问网络服务的使用条款
 
-### 联系我们
-
-| 渠道 | 地址 |
-| --- | --- |
-| 作者 | xiaohe |
-| GitHub 主页 | https://github.com/hezhanleiok |
-| 项目主页 | https://github.com/hezhanleiok/aether |
-| Telegram | https://t.me/xiaoheok |
-| Email | hezhanleiok@gmail.com |

@@ -1,8 +1,8 @@
 {
   "gui": {
-    "version": "1.1.0",
-    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.0/AetherVPN-1.1.0-win-x64.zip",
-    "notes": "首个 Release 版本：便携版 + 安装版，GUI 与核心捆绑更新"
+    "version": "1.1.1",
+    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.1/AetherVPN-1.1.1-win-x64.zip",
+    "notes": "修正便携版目录结构（解压即可运行）、新增应用图标、修复手动选节点后 MASQUE/H2/H3/MIM 无法连接"
   },
   "core": {
     "version": "v2.0.0",

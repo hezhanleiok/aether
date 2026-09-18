@@ -144,7 +144,7 @@ Core 版本变化只需：替换 core-bin\aether.exe（或 libaether.dll + 设�
   - 由 **xiaohe** 开发并发布
   - 采用**试用授权**：自首次启动起可免费试用 **7 天**
   - 授权状态与到期时间由本仓库的 `version.json` 远程控制，到期后软件会提示续期
-  - 续期或获取授权请联系作者（见「联系作者」）
+  - 续期请联系作者（作者主页见仓库首页）
 - **Aether 核心**
   - 本项目内置并随包分发 [Aether](https://github.com/CluvexStudio/Aether) 核心二进制文件
   - 该核心的版权与许可证归原作者 **CluvexStudio** 所有，本项目仅作调用与随包分发

@@ -107,6 +107,28 @@ func (m *Manager) State() State {
 	return st
 }
 
+// peerMatchesTransport reports whether a gateway pinned from the node pool may
+// be handed to the core as AETHER_PEER for this transport.
+//
+// The pool is probed over TCP/443 against Cloudflare edges, so a pin is valid
+// for the WireGuard-class transports only. On MASQUE the same address is not a
+// MASQUE gateway and the handshake fails, which used to hang every later
+// connect attempt.
+func peerMatchesTransport(proto string) bool {
+	// Only the plain WireGuard transport can take a single pinned endpoint.
+	// gool needs an outer+inner pair (it scans for both and ignored a lone
+	// AETHER_PEER anyway), MASQUE/MIM need their own gateways, and "" means
+	// the core chooses the transport itself.
+	return proto == "wg"
+}
+
+func transportName(proto string) string {
+	if proto == "" {
+		return "auto"
+	}
+	return proto
+}
+
 // envFor derives every AETHER_* variable the core needs from settings.
 func envFor(s config.Settings) map[string]string {
 	env := map[string]string{}
@@ -202,8 +224,21 @@ func envFor(s config.Settings) map[string]string {
 	if s.AutoReconnect {
 		set("AETHER_QUICK_RECONNECT", "1")
 	}
+	// A pinned gateway comes from the node pool, which is probed over TCP/443
+	// against plain Cloudflare edges. Those addresses are WireGuard-class
+	// endpoints, so the pin is safe for wg/gool — but they are NOT MASQUE
+	// gateways. Forcing one onto MASQUE makes the TLS handshake fail with
+	// CERTIFICATE_VERIFY_FAILED, after which the core keeps retrying that same
+	// gateway until the watchdog gives up (seen as a hang on every later
+	// connect). So MASQUE-class transports always fall back to the core's own
+	// scan instead.
 	if s.CachedGateway != "" && !s.AutoScan {
-		set("AETHER_PEER", s.CachedGateway)
+		if peerMatchesTransport(env["AETHER_PROTOCOL"]) {
+			set("AETHER_PEER", s.CachedGateway)
+		} else {
+			logx.Infof("[vpn] pinned gateway %s is not a %s endpoint; scanning instead",
+				s.CachedGateway, transportName(env["AETHER_PROTOCOL"]))
+		}
 	}
 	if len(s.DNSServers) > 0 && s.DNSMode != config.DNSSystem {
 		set("AETHER_DNS", strings.Join(s.DNSServers, ","))

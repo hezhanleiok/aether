@@ -48,7 +48,10 @@ try {
 
     Write-Host "[3/5] Creating zip..." -ForegroundColor Cyan
     $zip = Join-Path $build "AetherVPN-$Version-win-x64.zip"
-    Compress-Archive -Path $stage -DestinationPath $zip -Force
+    # Flatten: the exe and core-bin/ sit at the archive root, so unpacking
+    # gives a folder you can run from directly (v2rayN-style layout) instead
+    # of a single nested directory.
+    Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
 
     Write-Host "[4/5] Building installer..." -ForegroundColor Cyan
     Copy-Item $zip $payload -Force
