@@ -1,7 +1,20 @@
 # AetherVPN — Windows VPN Client (Go + Aether Core)
 
+> 基于 [Aether](https://github.com/CluvexStudio/Aether) 核心构建的 Windows 图形客户端。
+> 作者：**xiaohe**
+
 Go 原生 GUI 驱动 Aether Core 的 Windows VPN 客户端。核心网络功能（WARP / WireGuard /
 MASQUE / WARP-in-WARP / Gateway 发现与验证）全部由独立的 Aether Core 提供，GUI 不重复实现。
+
+## 下载
+
+| 文件 | 说明 |
+| --- | --- |
+| `AetherVPN-<版本>-win-x64.zip` | 便携版：解压后双击 `AetherVPN.exe` 即可运行 |
+| `AetherVPN-Setup-<版本>.exe` | 安装版：安装完成后自动创建桌面快捷方式 |
+
+两个版本均自带配套的 Aether 核心，无需另行下载。最新版本见
+[Releases](https://github.com/hezhanleiok/aether/releases)。
 
 ## 架构
 
@@ -37,7 +50,9 @@ AetherVPN.exe (Go 外壳)
 - 通信接口模块化（Backend 接口），升级 Core 不动上层
 - **本地优先**：只实现本地 Core 的启动与连接，Core 二进制由用户放到
   exe 旁 / core-bin\ / 设置页指定路径；发现过程不访问任何网络
-- **无硬编码仓库/Release URL/更新服务器**，**不做自动更新**（by design）
+- **更新**：启动时自检 + 关于页手动「检查更新」，全程在软件内完成，不跳转浏览器；
+  GUI 与其配套核心以**整包**形式一起替换，不会出现「核心已更新而界面未更新」的不兼容情况
+- **授权**：试用制，到期提示与联系方式由仓库 `version.json` 远程控制（详见「授权与许可」）
 
 ## 功能
 
@@ -61,17 +76,20 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-core.ps1 -CorePath C:\pat
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ```
 
-### 产物结构（与 v2rayN 一样：GUI 与核心分离）
+### 产物结构
 
 ```
-bin\
-  AetherVPN.exe          ← 唯一的 GUI 程序（双击即用，无需安装）
+AetherVPN-<版本>\
+  AetherVPN.exe          ← GUI 程序（双击即用，无需安装）
   core-bin\
-    aether.exe           ← Aether Core，独立进程，升级时单独替换
+    aether.exe           ← Aether Core，独立进程
+  README.txt
 ```
 
-`bin\` 下**只有一个 exe**。核心是独立进程，可以单独替换/升级而不动 GUI：
-换核心后进入「设置 → Aether 核心」点「检测核心」即可。
+核心始终是独立进程，GUI 通过 `coremgr` 调用它。但**更新时 GUI 与核心作为一个整包一起替换**，
+以保证版本配套、不会出现核心先于界面更新的不兼容情况。
+
+手动更换核心仍然可行：替换 `core-bin\aether.exe` 后进入「设置 → Aether 核心」点「检测核心」即可。
 
 不需要 WebView2 运行时的机器会自动降级到 Edge/Chrome 的无边框窗口，界面完全一致。
 
@@ -119,3 +137,33 @@ UI 调试（只起服务，可用浏览器打开同一套界面）：
 
 Core 版本变化只需：替换 core-bin\aether.exe（或 libaether.dll + 设置里切 library 模式）→
 设置页点 Detect。Backend 接口不变；若新 Core 改了日志格式，只改 process_backend.go 的 classify()。
+
+## 授权与许可
+
+- **本客户端（GUI）**
+  - 由 **xiaohe** 开发并发布
+  - 采用**试用授权**：自首次启动起可免费试用 **7 天**
+  - 授权状态与到期时间由本仓库的 `version.json` 远程控制，到期后软件会提示续期
+  - 续期或获取授权请联系作者（见「联系作者」）
+- **Aether 核心**
+  - 本项目内置并随包分发 [Aether](https://github.com/CluvexStudio/Aether) 核心二进制文件
+  - 该核心的版权与许可证归原作者 **CluvexStudio** 所有，本项目仅作调用与随包分发
+  - 核心更新始终与 GUI 版本配套发布，不会单独变更
+- 请遵守所在地法律法规，以及所访问网络服务的使用条款
+
+## 致谢
+
+- **特别感谢 [Aether](https://github.com/CluvexStudio/Aether)（CluvexStudio）** —
+  本客户端的全部网络能力（WARP / WireGuard / MASQUE / MASQUE-in-MASQUE / Gool /
+  网关发现与验证）都来自这个项目。没有 Aether，就没有 AetherVPN。
+- 感谢 [Aethery](https://github.com/ZethRise/Aethery) 在移动端上的探索与参考。
+
+## 联系作者
+
+| 渠道 | 地址 |
+| --- | --- |
+| 作者 | xiaohe |
+| GitHub 主页 | https://github.com/hezhanleiok |
+| 项目主页 | https://github.com/hezhanleiok/aether |
+| Telegram | https://t.me/xiaoheok |
+| Email | hezhanleiok@gmail.com |
