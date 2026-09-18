@@ -158,12 +158,3 @@ Core 版本变化只需：替换 core-bin\aether.exe（或 libaether.dll + 设�
   网关发现与验证）都来自这个项目。没有 Aether，就没有 AetherVPN。
 - 感谢 [Aethery](https://github.com/ZethRise/Aethery) 在移动端上的探索与参考。
 
-## 联系作者
-
-| 渠道 | 地址 |
-| --- | --- |
-| 作者 | xiaohe |
-| GitHub 主页 | https://github.com/hezhanleiok |
-| 项目主页 | https://github.com/hezhanleiok/aether |
-| Telegram | https://t.me/xiaoheok |
-| Email | hezhanleiok@gmail.com |
