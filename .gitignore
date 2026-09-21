@@ -5,6 +5,10 @@ tmp/
 core-bin/
 aether-tor/
 aether-masque*.toml
+# WARP identities and gateway caches: machine-local credentials, never commit
+aether.toml
+aether-secondary.toml
+*lastconn*.toml
 aether-src.tar.gz
 *.log
 *.new
