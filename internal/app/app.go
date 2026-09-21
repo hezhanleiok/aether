@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,15 @@ type App struct {
 	onState []func(vpn.State)
 	onNodes []func()
 	onCore  []func()
+
+	// Gool exit re-selection. A WARP-in-WARP tunnel coming up is not by itself
+	// a usable result: the public exit can still land inside mainland China.
+	// These fields track how many outer/inner pairs have been tried.
+	goolMu       sync.Mutex
+	goolTries    int
+	goolRetrying bool
+	goolLastExit string    // exit already judged, so it is never judged twice
+	goolLastTry time.Time  // when the last pair was tried (session window)
 }
 
 // pickBackend chooses the core driver per settings: an explicit kind wins;
@@ -112,6 +122,9 @@ func New() (*App, error) {
 	a.VPN.Subscribe(func(st vpn.State) { a.recoverFromFailedPin(st) })
 	// MIM first tries H3; on failure it retries once over H2 (--mim --h2).
 	a.VPN.Subscribe(func(st vpn.State) { a.mimH2Fallback(st) })
+	// Gool: "connected" is not the finish line, a usable exit is. When the
+	// tunnel comes up inside mainland China, re-select the outer/inner pair.
+	a.VPN.Subscribe(func(st vpn.State) { a.goolExitGuard(st) })
 	// The exit IP can only be queried once the tunnel is actually up. Firing it
 	// from Connect() races the gateway scan: the core may need a minute before
 	// SOCKS listens, so the lookup used to die with "connection refused" and
@@ -264,6 +277,103 @@ func (a *App) recoverFromFailedPin(st vpn.State) {
 	}()
 }
 
+// goolMaxExitTries is how many outer/inner pairs are tried before giving up.
+const goolMaxExitTries = 5
+
+// goolSessionWindow is how long a stretch of re-selections counts as a single
+// search. Past it the counter restarts, so a later manual connect is not
+// charged for attempts made minutes ago.
+const goolSessionWindow = 5 * time.Minute
+
+// mainlandExit reports whether a measured exit counts as mainland China.
+//
+// Besides the reported country, the 104.28.0.0/16 range is matched on purpose:
+// in testing every WARP exit — across gool, MASQUE H2 and MIM, and across the
+// LAX/SIN/HKG/KIX pops — came from that range with loc=CN, so trusting the
+// country name alone would miss it whenever the geo lookup comes back empty.
+func mainlandExit(country, ip string) bool {
+	if strings.Contains(strings.ToLower(country), "china") {
+		return true
+	}
+	return strings.HasPrefix(ip, "104.28.")
+}
+
+// goolExitGuard re-selects the WARP-in-WARP pair while the tunnel is up but the
+// public exit still sits inside mainland China.
+//
+// Gool rides two WARP hops, and which hop the traffic leaves from decides the
+// exit country, so "connected" alone is not a usable result. After
+// goolMaxExitTries pairs it stops with a clear message rather than looping.
+func (a *App) goolExitGuard(st vpn.State) {
+	// Gate on the exit IP, not the country: the geo lookup fails often enough
+	// that waiting for a country name would skip the guard entirely, and the
+	// 104.28.0.0/16 check inside mainlandExit catches those cases anyway.
+	if st.Status != vpn.StatusConnected || st.ExitIP == "" {
+		return
+	}
+	if !vpn.IsGool(a.Settings) {
+		return
+	}
+
+	a.goolMu.Lock()
+	// SetExitInfo publishes more than once per tunnel, and goolRetrying means a
+	// re-selection is already in flight. Without both checks the same exit is
+	// judged over and over — every attempt was burned within one second, with
+	// several concurrent re-selections stacked on top of each other.
+	if a.goolRetrying || st.ExitIP == a.goolLastExit {
+		a.goolMu.Unlock()
+		return
+	}
+	a.goolLastExit = st.ExitIP
+	if !mainlandExit(st.ExitCountry, st.ExitIP) {
+		a.goolTries = 0
+		a.goolMu.Unlock()
+		return
+	}
+	// The guard owns the counter with a session window, so a fresh search (or
+	// one after a long pause) starts over while the tight loop of
+	// re-selections keeps climbing to the limit.
+	if time.Since(a.goolLastTry) > goolSessionWindow {
+		a.goolTries = 0
+	}
+	a.goolLastTry = time.Now()
+	a.goolTries++
+	tries := a.goolTries
+	a.goolMu.Unlock()
+
+	if tries > goolMaxExitTries {
+		logx.Warnf("[app] gool: %d outer/inner pairs all exited from mainland China; stopping",
+			goolMaxExitTries)
+		a.VPN.SetError("当前 Gool 无可用境外出口（已试 " + strconv.Itoa(goolMaxExitTries) + " 组）")
+		return
+	}
+	logx.Warnf("[app] gool exit is %s (%s); re-selecting outer/inner (attempt %d/%d)",
+		st.ExitCountry, st.ExitIP, tries, goolMaxExitTries)
+	go a.reselectGoolPair()
+}
+
+// reselectGoolPair tears the tunnel down and connects again with a forced
+// rescan, so the core picks a different outer/inner pair.
+func (a *App) reselectGoolPair() {
+	a.goolMu.Lock()
+	a.goolRetrying = true
+	a.goolMu.Unlock()
+	defer func() {
+		a.goolMu.Lock()
+		a.goolRetrying = false
+		a.goolMu.Unlock()
+	}()
+
+	a.Disconnect()
+	// Drop the cached gateway so the next attempt really scans for a new pair
+	// instead of reusing the one that just produced a mainland exit.
+	a.RescanGateways()
+	time.Sleep(2 * time.Second)
+	if err := a.Connect(); err != nil {
+		logx.Warnf("[app] gool re-select failed: %v", err)
+	}
+}
+
 // mimH2Fallback retries MIM over HTTP/2 when the default H3 (QUIC) path fails.
 // The core supports --mim --h2; this gives MIM a second chance on networks
 // where QUIC is blocked but TCP 443 gets through.
@@ -299,6 +409,16 @@ func (a *App) GatewayUnhealthy() {
 // Connect starts the VPN honoring the current settings and mode.
 func (a *App) Connect() error {
 	s := a.Settings
+	// A fresh, user-initiated connect starts the gool exit search over. The
+	// guard's own retries must not reset the counter, or it would loop forever.
+	// Only the "already judged" marker is cleared here. The attempt counter is
+	// owned by goolExitGuard's session window: resetting it here would let the
+	// automatic reconnect that follows every Disconnect (it calls Connect with
+	// goolRetrying already false) clear the counter mid-search, pinning the
+	// guard at attempt 1 forever.
+	a.goolMu.Lock()
+	a.goolLastExit = ""
+	a.goolMu.Unlock()
 	if s.Mode == config.ModeDirect {
 		a.Disconnect()
 		return nil

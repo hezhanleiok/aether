@@ -221,7 +221,11 @@ func envFor(s config.Settings) map[string]string {
 	if s.PreferredProfile != "" {
 		set("AETHER_NOIZE", s.PreferredProfile)
 	}
-	if s.AutoReconnect {
+	// Quick reconnect reuses the gateway from the last session. Gool finds a
+	// different outer/inner pair by rescanning, so it must not be short-
+	// circuited while the user is on automatic gateway selection — otherwise
+	// every retry would come back with the very pair we just rejected.
+	if s.AutoReconnect && !(s.AutoScan && IsGool(s)) {
 		set("AETHER_QUICK_RECONNECT", "1")
 	}
 	// A pinned gateway comes from the node pool, which is probed over TCP/443
@@ -305,6 +309,14 @@ func EnvFor(s config.Settings) map[string]string { return envFor(s) }
 // and MIM validates an inner hop on top of the outer one.
 func IsSlowMasque(s config.Settings) bool {
 	return s.Mode == config.ModeMasqueH2 || s.Protocol == "mim"
+}
+
+// IsGool reports whether the active transport is WARP-in-WARP ("gool").
+func IsGool(s config.Settings) bool {
+	if s.Mode == config.ModeGool {
+		return true
+	}
+	return s.Mode == config.ModeAuto && s.Protocol == "gool"
 }
 
 // Connect launches the core through the Core Controller.
@@ -432,6 +444,11 @@ func (m *Manager) SetTesting(on bool) {
 	} else if m.State().Status == StatusTesting {
 		m.set(StatusConnected, nil)
 	}
+}
+
+// SetError marks the attempt as failed with a user-facing reason.
+func (m *Manager) SetError(msg string) {
+	m.set(StatusFailed, func(st *State) { st.Error = msg })
 }
 
 // SetGateway records the active gateway (from scan events).

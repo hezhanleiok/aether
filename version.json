@@ -1,8 +1,8 @@
 {
   "gui": {
-    "version": "1.1.1",
-    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.1/AetherVPN-1.1.1-win-x64.zip",
-    "notes": "修正便携版目录结构（解压即可运行）、新增应用图标、修复手动选节点后 MASQUE/H2/H3/MIM 无法连接"
+    "version": "1.1.2",
+    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.2/AetherVPN-1.1.2-win-x64.zip",
+    "notes": "Gool 增加出口检测与自动重选：连上但出口仍是国内时会换一组 outer/inner 重试，全部失败才提示"
   },
   "core": {
     "version": "v2.0.0",
