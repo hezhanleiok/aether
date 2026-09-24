@@ -97,6 +97,10 @@ version.json 远程控制。
 
     Write-Utf8 (Join-Path $stage "CHANGELOG.txt") @"
 $Version
+  - 修复 Gool（WARP-in-WARP）连接成功后反复断开重连（不再因出口地区主动断开）
+  - 内置 Aether 核心升级至官方最新稳定版 v2.1.0
+
+1.1.3
   - 重新整理 Windows 便携版目录结构（界面/核心分离，附带文档与许可）
   - 发布流程改为 Build/Stage/Validate/Package/Checksum 并附 SHA256 校验和
   - Gool（WARP-in-WARP）增加出口检测与自动重选
