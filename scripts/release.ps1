@@ -1,19 +1,20 @@
-# Builds a release: portable zip + Windows installer, and (with -Token)
-# publishes both as a GitHub release.
+# Builds the Windows release: portable ZIP + installer, plus checksums, and
+# (with -Token) publishes it as a GitHub release.
 #
-#   .\scripts\release.ps1
+#   .\scripts\release.ps1                     # build only
 #   .\scripts\release.ps1 -Version 1.2.0
-#   .\scripts\release.ps1 -Token <PAT>          # build + publish
+#   .\scripts\release.ps1 -Token <PAT>        # build + publish
 #
-# The GUI and its core are always packaged together so the two can never
-# drift apart on a user's machine.
+# Pipeline: Build -> Stage -> Validate -> Package -> Checksum -> Release
 #
-# NOTE: kept ASCII-only on purpose - PowerShell 5.1 reads .ps1 files with the
-# system ANSI codepage, so non-ASCII text here would be mis-parsed. The
-# Chinese release notes live in release-notes.md and are read as UTF-8.
+# The GUI and its core are packaged together, so the two can never drift apart.
+#
+# NOTE: ASCII-only on purpose - PowerShell 5.1 reads .ps1 files with the system
+# ANSI codepage, so non-ASCII text here would be mis-parsed. File contents that
+# need Chinese are written with an explicit UTF-8 writer below.
 
 param(
-    [string]$Version = "1.1.0",
+    [string]$Version = "1.1.3",
     [string]$Token = $env:GITHUB_TOKEN
 )
 
@@ -21,10 +22,16 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
-$build     = Join-Path $root "build"
-$stage     = Join-Path $build "AetherVPN-$Version"
-$payload   = Join-Path $root "cmd\aethersetup\payload\bundle.zip"
+$build = Join-Path $root "build"
+$stage = Join-Path $build "AetherVPN-$Version-win-x64"
+$zip = Join-Path $build "AetherVPN-$Version-win-x64.zip"
+$setup = Join-Path $build "AetherVPN-Setup-$Version.exe"
+$payload = Join-Path $root "cmd\aethersetup\payload\bundle.zip"
 $payloadBak = Join-Path $env:TEMP "bundle-placeholder.zip"
+
+function Write-Utf8($Path, $Text) {
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding $false))
+}
 
 if (Test-Path $payload) { Copy-Item $payload $payloadBak -Force }
 
@@ -32,67 +39,173 @@ try {
     Remove-Item -Recurse -Force $build -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $build | Out-Null
 
-    Write-Host "[1/5] Building GUI client..." -ForegroundColor Cyan
+    # ---------------------------------------------------------------- Build
+    Write-Host "[1/6] Build" -ForegroundColor Cyan
     go build -ldflags="-H=windowsgui" -o (Join-Path $build "AetherVPN.exe") ./cmd/aethergui
     if ($LASTEXITCODE -ne 0) { throw "GUI build failed" }
+    Write-Host "      GUI      -> AetherVPN.exe"
 
-    Write-Host "[2/5] Staging portable package..." -ForegroundColor Cyan
+    # ---------------------------------------------------------------- Stage
+    Write-Host "[2/6] Stage" -ForegroundColor Cyan
     New-Item -ItemType Directory -Force -Path (Join-Path $stage "core-bin") | Out-Null
-    Copy-Item (Join-Path $build "AetherVPN.exe") $stage -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $stage "docs") | Out-Null
+
+    Copy-Item (Join-Path $build "AetherVPN.exe") (Join-Path $stage "AetherVPN.exe") -Force
     Copy-Item (Join-Path $root "core-bin\aether.exe") (Join-Path $stage "core-bin\aether.exe") -Force
-    $readme = "AetherVPN $Version`r`n`r`n" +
-              "  - Run AetherVPN.exe directly (portable, no install needed)`r`n" +
-              "  - core-bin\aether.exe is the bundled Aether core`r`n" +
-              "  - Updates replace GUI and core together, so they always match`r`n"
-    [System.IO.File]::WriteAllText((Join-Path $stage "README.txt"), $readme)
 
-    Write-Host "[3/5] Creating zip..." -ForegroundColor Cyan
-    $zip = Join-Path $build "AetherVPN-$Version-win-x64.zip"
-    # Flatten: the exe and core-bin/ sit at the archive root, so unpacking
-    # gives a folder you can run from directly (v2rayN-style layout) instead
-    # of a single nested directory.
+    # Both binaries are pure Go (CGO_ENABLED=0, no `import "C"` anywhere), so
+    # they are statically linked and need no third-party DLLs or runtime files
+    # beside them. Nothing is added here just to make the package look bigger.
+
+    Write-Utf8 (Join-Path $stage "README.txt") @"
+AetherVPN $Version
+
+  双击 AetherVPN.exe 即可启动，无需安装。
+
+目录说明
+  AetherVPN.exe        图形界面（Go 编写，静态链接，无需额外运行库）
+  core-bin\aether.exe  Aether 核心，独立进程，由界面调用
+  docs\                项目文档
+  LICENSE.txt          许可与第三方声明
+  CHANGELOG.txt        版本变更记录
+
+说明
+  - 界面与核心分离：核心是可独立替换的进程，但更新时二者随同一个更新包
+    一起替换，以保证版本配套。
+  - 首次启动会在 %LOCALAPPDATA%\AetherGUI 下保存设置，卸载只需删除该目录。
+  - 若本机没有 WebView2 运行时，界面会自动改用 Edge/Chrome 的无边框窗口，
+    功能完全一致。
+"@
+
+    Write-Utf8 (Join-Path $stage "LICENSE.txt") @"
+AetherVPN
+Copyright (c) xiaohe
+
+本客户端（GUI）由 xiaohe 开发并发布，采用试用授权：自首次启动起可免费
+试用 7 天，到期后软件会提示续期，授权状态与到期时间由项目仓库中的
+version.json 远程控制。
+
+第三方组件
+  - Aether（CluvexStudio）：本软件内置并随包分发其官方核心二进制文件
+    aether.exe。该核心的版权与许可证归原作者 CluvexStudio 所有，本项目
+    仅作调用与随包分发，未修改其核心代码。
+  - 其余 Go 语言依赖见仓库 go.mod 与 vendor\ 目录。
+
+本软件按「原样」提供，作者不对使用后果作任何担保。请遵守所在地法律法规
+以及所访问网络服务的使用条款。
+"@
+
+    Write-Utf8 (Join-Path $stage "CHANGELOG.txt") @"
+$Version
+  - 重新整理 Windows 便携版目录结构（界面/核心分离，附带文档与许可）
+  - 发布流程改为 Build/Stage/Validate/Package/Checksum 并附 SHA256 校验和
+  - Gool（WARP-in-WARP）增加出口检测与自动重选
+  - 修复手动指定节点后 MASQUE H2/H3 无法连接的问题
+  - 新增应用图标（任务栏/窗口/安装包）
+
+1.1.1
+  - 便携包改为平铺结构，解压即可运行
+  - 修复手动选节点导致 MASQUE 系列握手失败
+
+1.1.0
+  - 首个 Release 版本：便携版 + 安装版
+  - 改用 GitHub Release 发布，不再把 exe 放在仓库根目录
+"@
+
+    if (Test-Path (Join-Path $root "ARCHITECTURE.md")) {
+        Copy-Item (Join-Path $root "ARCHITECTURE.md") (Join-Path $stage "docs\ARCHITECTURE.md") -Force
+    }
+    if (Test-Path (Join-Path $root "README.md")) {
+        Copy-Item (Join-Path $root "README.md") (Join-Path $stage "docs\README.md") -Force
+    }
+    Write-Host "      staged -> $stage"
+
+    # ------------------------------------------------------------- Validate
+    Write-Host "[3/6] Validate" -ForegroundColor Cyan
+    $required = @(
+        (Join-Path $stage "AetherVPN.exe"),
+        (Join-Path $stage "core-bin\aether.exe"),
+        (Join-Path $stage "README.txt"),
+        (Join-Path $stage "LICENSE.txt"),
+        (Join-Path $stage "CHANGELOG.txt")
+    )
+    foreach ($f in $required) {
+        if (-not (Test-Path $f)) { throw "missing staged file: $f" }
+        if ((Get-Item $f).Length -eq 0) { throw "empty staged file: $f" }
+    }
+    # The core must actually run: this proves the packaged binary is intact and
+    # not dependent on anything from the development machine.
+    $coreVersion = & (Join-Path $stage "core-bin\aether.exe") --version 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "packaged core did not run: $coreVersion" }
+    Write-Host ("      core ok -> " + ($coreVersion | Out-String).Trim())
+
+    # -------------------------------------------------------------- Package
+    Write-Host "[4/6] Package" -ForegroundColor Cyan
     Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
-
-    Write-Host "[4/5] Building installer..." -ForegroundColor Cyan
     Copy-Item $zip $payload -Force
-    go build -ldflags="-H=windowsgui" -o (Join-Path $build "AetherVPN-Setup-$Version.exe") ./cmd/aethersetup
-    if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
+    go build -ldflags="-H=windowsgui" -o $setup ./cmd/aethersetup
+    if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
     Copy-Item $payloadBak $payload -Force   # keep big binaries out of the repo
+    Write-Host "      zip     -> $(Split-Path $zip -Leaf)"
+    Write-Host "      setup   -> $(Split-Path $setup -Leaf)"
 
-    Write-Host "[5/5] Rendering release notes..." -ForegroundColor Cyan
-    $tplPath = Join-Path $root "scripts\release-notes.md"
-    $tpl = [System.IO.File]::ReadAllText($tplPath, [System.Text.Encoding]::UTF8)
-    $notes = $tpl.Replace("{version}", $Version)
-    [System.IO.File]::WriteAllText((Join-Path $build "RELEASE_NOTES.md"), $notes, (New-Object System.Text.UTF8Encoding $false))
+    # ------------------------------------------------------------- Checksum
+    Write-Host "[5/6] Checksum" -ForegroundColor Cyan
+    $sums = @()
+    foreach ($f in @($zip, $setup)) {
+        $h = (Get-FileHash -Path $f -Algorithm SHA256).Hash.ToLower()
+        $sums += ("{0}  {1}" -f $h, (Split-Path $f -Leaf))
+    }
+    $sumFile = Join-Path $build "SHA256SUMS.txt"
+    Write-Utf8 $sumFile (($sums -join "`n") + "`n")
+    Write-Host "      -> SHA256SUMS.txt"
+    $sums | ForEach-Object { Write-Host "         $_" }
 
+    # -------------------------------------------------------------- Release
     if (-not $Token) {
         Write-Host ""
-        Write-Host "Build finished. Artifacts in build\ :" -ForegroundColor Green
-        Get-ChildItem $build -File | ForEach-Object { Write-Host ("  " + $_.Name + "  " + [math]::Round($_.Length / 1MB, 1) + " MB") }
-        Write-Host "To publish: .\scripts\release.ps1 -Version $Version -Token <PAT>" -ForegroundColor Yellow
+        Write-Host "[6/6] Release skipped (no token). Artifacts in build\" -ForegroundColor Yellow
         return
     }
 
-    Write-Host ""
-    Write-Host "Creating GitHub release v$Version ..." -ForegroundColor Cyan
-    $proxy = "http://127.0.0.1:10808"
+    Write-Host "[6/6] Release" -ForegroundColor Cyan
+    # The proxy is optional and comes from the environment: a dev box behind a
+    # local proxy sets HTTPS_PROXY, while a CI runner has direct egress and
+    # leaves it unset. Hard-coding one here would break the runner.
+    $proxy = $env:HTTPS_PROXY
     $hdr = @{ Authorization = "Bearer $Token"; Accept = "application/vnd.github+json" }
 
-    # Send UTF-8 bytes explicitly: PowerShell 5.1 would otherwise encode the
-    # body with the system ANSI codepage and every Chinese character in the
-    # release notes would arrive on GitHub as '?'.
-    $body = (@{ tag_name = "v$Version"; name = "AetherVPN v$Version"; body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json)
-    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/hezhanleiok/aether/releases" `
-        -Method Post -Headers $hdr -Proxy $proxy -ContentType "application/json; charset=utf-8" `
-        -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+    $notesPath = Join-Path $root "scripts\release-notes.md"
+    $notes = [System.IO.File]::ReadAllText($notesPath, [System.Text.Encoding]::UTF8)
+    $notes = $notes.Replace("{version}", $Version)
+    $notes += "`n`n### SHA256`n`n``````n" + ($sums -join "`n") + "`n``````n"
 
-    foreach ($f in @("AetherVPN-$Version-win-x64.zip", "AetherVPN-Setup-$Version.exe")) {
-        $p = Join-Path $build $f
-        $bytes = [System.IO.File]::ReadAllBytes($p)
-        $up = "https://uploads.github.com/repos/hezhanleiok/aether/releases/$($rel.id)/assets?name=$f"
-        Invoke-RestMethod -Uri $up -Method Post -Headers $hdr -Proxy $proxy `
-            -ContentType "application/octet-stream" -Body $bytes | Out-Null
-        Write-Host ("  uploaded " + $f) -ForegroundColor Green
+    $body = @{ tag_name = "v$Version"; name = "AetherVPN v$Version"; body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json
+
+    # Splatting so the proxy key is only present when one is configured -
+    # passing -Proxy $null is an error.
+    $post = @{
+        Uri         = "https://api.github.com/repos/hezhanleiok/aether/releases"
+        Method      = 'Post'
+        Headers     = $hdr
+        ContentType = "application/json; charset=utf-8"
+        Body        = [System.Text.Encoding]::UTF8.GetBytes($body)
+    }
+    if ($proxy) { $post.Proxy = $proxy }
+    $rel = Invoke-RestMethod @post
+
+    foreach ($f in @((Split-Path $zip -Leaf), (Split-Path $setup -Leaf), "SHA256SUMS.txt")) {
+        $bytes = [System.IO.File]::ReadAllBytes((Join-Path $build $f))
+        $put = @{
+            Uri         = "https://uploads.github.com/repos/hezhanleiok/aether/releases/$($rel.id)/assets?name=$f"
+            Method      = 'Post'
+            Headers     = $hdr
+            ContentType = "application/octet-stream"
+            Body        = $bytes
+        }
+        if ($proxy) { $put.Proxy = $proxy }
+        Invoke-RestMethod @put | Out-Null
+        Write-Host "      uploaded $f"
     }
     Write-Host ""
     Write-Host ("Release published: " + $rel.html_url) -ForegroundColor Green

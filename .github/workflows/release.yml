@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 1.1.3)'
+        required: true
+        default: '1.1.3'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $v = '${{ inputs.version }}'
+          } else {
+            $v = '${{ github.ref_name }}' -replace '^v', ''
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "building version $v"
+
+      # The core is not vendored in this repository (core-bin/ is ignored), so
+      # the runner pulls the matching official binary. Nothing here rebuilds or
+      # patches the core.
+      - name: Fetch official Aether core
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path core-bin | Out-Null
+          $tmp = Join-Path $env:RUNNER_TEMP 'core'
+          $zip = Join-Path $env:RUNNER_TEMP 'core.zip'
+          Invoke-WebRequest -Uri 'https://github.com/CluvexStudio/Aether/releases/download/v2.0.0/aether-windows-x86_64.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $tmp -Force
+          $exe = Get-ChildItem $tmp -Recurse -Filter 'aether.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'aether.exe not found in the official archive' }
+          Copy-Item $exe.FullName -Destination 'core-bin\aether.exe' -Force
+          & 'core-bin\aether.exe' --version
+
+      - name: Build, package and publish
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          .\scripts\release.ps1 -Version '${{ steps.ver.outputs.version }}' -Token $env:GITHUB_TOKEN

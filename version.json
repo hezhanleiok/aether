@@ -1,8 +1,8 @@
 {
   "gui": {
-    "version": "1.1.2",
-    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.2/AetherVPN-1.1.2-win-x64.zip",
-    "notes": "Gool 增加出口检测与自动重选：连上但出口仍是国内时会换一组 outer/inner 重试，全部失败才提示"
+    "version": "1.1.3",
+    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.3/AetherVPN-1.1.3-win-x64.zip",
+    "notes": "重新整理便携版目录结构、构建流程加入校验与校验和；Gool 增加出口检测与自动重选"
   },
   "core": {
     "version": "v2.0.0",

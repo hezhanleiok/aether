@@ -1,41 +1,55 @@
 ## AetherVPN v{version}
 
-> 基于 [Aether](https://github.com/CluvexStudio/Aether) 核心构建的 Windows 图形客户端。
-
 ### 下载
 
 | 文件 | 说明 |
 | --- | --- |
 | `AetherVPN-{version}-win-x64.zip` | 便携版：解压后双击 `AetherVPN.exe` 即可运行 |
 | `AetherVPN-Setup-{version}.exe` | 安装版：安装完成后自动创建桌面快捷方式 |
+| `SHA256SUMS.txt` | 校验和，用于确认下载到的文件完整且未被篡改 |
 
-两个版本均自带配套的 Aether 核心，无需另行下载。
+### 便携版目录结构
 
-### 功能
+```
+AetherVPN.exe          图形界面（Go 静态链接，无需额外运行库）
+core-bin\aether.exe    Aether 核心，独立进程
+docs\                  项目文档
+LICENSE.txt            许可与第三方声明
+README.txt             使用说明
+CHANGELOG.txt          版本变更记录
+```
 
-- 支持 MASQUE（HTTP/2、HTTP/3）、MASQUE-in-MASQUE、WireGuard、Gool 等传输方式
-- 实时流量图表、节点延迟测试与自动选点、按规则分流
-- 系统代理接管与 Kill Switch 防泄漏
-- 启动自检 + 手动「检查更新」，更新全程在软件内完成，不跳转浏览器
+界面与核心保持分离：核心是可独立替换的进程，但通过更新包发布时二者一起
+替换，以保证版本配套。两个可执行文件均为 Go 静态编译的自包含程序，
+不需要额外的 DLL 或运行时文件。
 
 ### 本次更新
 
-- 更新机制改为**整合更新包**：GUI 客户端与 Aether 核心捆绑发布、一起替换，
-  不会出现「核心已更新而界面未更新」的不兼容情况
-- 发布方式改为 GitHub Release，不再把 exe 放在仓库根目录
-- 新增 Windows 安装程序，支持桌面与开始菜单快捷方式
-- 关于页：作者 xiaohe，附 GitHub / Telegram / Email 官方彩色图标
+- 重新整理 Windows 便携版目录结构（界面/核心分离，附带文档与许可）
+- 发布流程改为 Build / Stage / Validate / Package / Checksum，并附 SHA256 校验和
+- 新增 GitHub Actions 工作流，构建过程可复现
+- Gool（WARP-in-WARP）增加出口检测与自动重选
+- 修复手动指定节点后 MASQUE H2/H3 无法连接的问题
+- 新增应用图标（任务栏 / 窗口 / 安装包）
+
+### 关于安全软件提示
+
+本程序由 Go 语言静态编译、**未进行代码签名**，运行期间会启动本地 SOCKS5
+代理、修改系统代理设置并添加防火墙规则。这类网络行为特征容易被部分安全
+软件的启发式规则，以及浏览器 SmartScreen 的「不常见下载」机制误判，从而
+出现风险提示。
+
+需要说明：
+
+- 发布包**未使用任何加壳、压缩、混淆或反检测手段**，构建脚本完全公开可查
+- 请对照 `SHA256SUMS.txt` 校验文件哈希，确认一致后再运行
 
 ### 授权与许可
 
-- **本客户端（GUI）**
-  - 由 **xiaohe** 开发并发布
-  - 采用**试用授权**：自首次启动起可免费试用 **7 天**
-  - 到期后软件将提示续期，授权状态与到期时间由本仓库的 `version.json` 远程控制
-  - 续期请联系作者
-- **Aether 核心**
-  - 本软件内置的是 [Aether](https://github.com/CluvexStudio/Aether) 核心二进制文件
-  - 该核心的版权与许可证归原作者 **CluvexStudio** 所有，本项目仅作调用与随包分发
-  - 核心更新始终与 GUI 版本配套发布，不会单独变更
+- 本客户端（GUI）由 **xiaohe** 开发并发布
+- 采用**试用授权**：自首次启动起可免费试用 **7 天**
+- 到期后软件会提示续期，授权状态与到期时间由本仓库 `version.json` 远程控制
+- 续期请联系作者
+- 内置 Aether 核心的版权与许可证归原作者 **CluvexStudio** 所有，本项目仅作
+  调用与随包分发，未修改其核心代码
 - 请遵守所在地法律法规，以及所访问网络服务的使用条款
-
