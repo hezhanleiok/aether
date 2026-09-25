@@ -1,8 +1,8 @@
 {
   "gui": {
-    "version": "1.1.6",
-    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.6/AetherVPN-1.1.6-win-x64.zip",
-    "notes": "新增独立 Psiphon 模式（可选期望出口国家，Core v2.1.0 内置）"
+    "version": "1.1.7",
+    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.7/AetherVPN-1.1.7-win-x64.zip",
+    "notes": "Psiphon 改为独立出口方式，默认关闭；客户端启动不再拉起 Psiphon 组件"
   },
   "core": {
     "version": "v2.1.0",

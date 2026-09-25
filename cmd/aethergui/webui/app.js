@@ -354,7 +354,7 @@ function render() {
     case 'about': renderAbout(); break;
   }
   renderRecent();
-  if (page === 'home') renderProtocols();
+  if (page === 'home') { renderProtocols(); ensureExitUI(); syncExitUI(); }
 }
 
 function renderNav() {
@@ -468,6 +468,56 @@ function renderCoreBadges() {
 
 // ── protocol switcher ───────────────────────────────────────────
 const PROTO_ICON = { wg: 'i-shield', h2: 'i-split', h3: 'i-wifi', mim: 'i-server', gool: 'i-nodes', psiphon: 'i-server', auto: 'i-bolt' };
+// ── egress (出口方式) ────────────────────────────────────────────
+// The egress is a separate axis from the transport: the home screen picks
+// "默认出口" or "Psiphon". Only choosing Psiphon here — plus connecting —
+// starts psiphon. Starting the app never does.
+function ensureExitUI() {
+  if ($('#exitModeSel')) return;
+  const sel = $('#protoSelect');
+  if (!sel) return;
+  const card = sel.closest('.card');
+  if (!card) return;
+  const wrap = document.createElement('div');
+  wrap.innerHTML =
+    '<label class="field"><span>出口方式</span>' +
+    '<select id="exitModeSel">' +
+    '<option value="default">默认出口</option>' +
+    '<option value="psiphon">Psiphon</option>' +
+    '</select></label>' +
+    '<div class="kv-list wide" id="exitInfo"></div>';
+  card.appendChild(wrap);
+  $('#exitModeSel').onchange = async () => {
+    const v = $('#exitModeSel').value;
+    await api('/api/settings/exit', { exit: v });
+    S.settings = S.settings || {};
+    S.settings.exit_mode = v;
+    if (v === 'psiphon') {
+      S.settings.psiphon = S.settings.psiphon || {};
+      S.settings.psiphon.enabled = true;
+    }
+    toast(v === 'psiphon' ? '出口已切换为 Psiphon' : '出口已切换为默认', 'ok');
+    syncExitUI();
+  };
+}
+
+function syncExitUI() {
+  const es = $('#exitModeSel');
+  if (!es) return;
+  const s = S.settings || {};
+  const exit = s.exit_mode || 'default';
+  es.value = exit;
+  const proto = ((S.protocols || []).find((p) => p.key === S.activeProtocol) || {}).label || '—';
+  const p = s.psiphon || {};
+  const box = $('#exitInfo');
+  if (!box) return;
+  box.innerHTML =
+    `<div class="kv"><span>协议</span><b>${proto}</b></div>` +
+    (exit === 'psiphon'
+      ? `<div class="kv"><span>出口</span><b>Psiphon · ${p.region || '自动'}</b></div>`
+      : '<div class="kv"><span>出口</span><b>默认出口</b></div>');
+}
+
 function renderProtocols() {
   const sel = $('#protoSelect');
   const list = S.protocols;

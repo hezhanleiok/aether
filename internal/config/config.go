@@ -26,6 +26,18 @@ const (
 	ModePsiphon   Mode = "psiphon"   // Psiphon, carried by the core itself (v2.1.0+)
 )
 
+// ExitMode selects where the traffic leaves from, independently of the
+// transport. It is deliberately separate: choosing Psiphon here is what starts
+// psiphon, and nothing else may do it.
+type ExitMode string
+
+const (
+	// ExitDefault leaves through the tunnel itself (no third-party egress).
+	ExitDefault ExitMode = "default"
+	// ExitPsiphon routes the exit through psiphon, which the core ships.
+	ExitPsiphon ExitMode = "psiphon"
+)
+
 // PsiphonRegion is one entry of the country picker. The code is what the core
 // receives (--psiphon-region <cc>); "" means "let Psiphon choose".
 type PsiphonRegion struct {
@@ -173,6 +185,11 @@ type Settings struct {
 	// credentials or keys — only the requested country and fronting shape.
 	Psiphon PsiphonSettings `json:"psiphon"`
 
+	// Exit is the egress choice on the home screen. It is what decides whether
+	// psiphon ever runs — never the app start-up, and never "launch with
+	// Windows", which starts the client only.
+	Exit ExitMode `json:"exit_mode"`
+
 	// Advanced
 	LogLevel       string `json:"log_level"`       // error..trace
 	ConnectTimeout int    `json:"connect_timeout"` // seconds
@@ -237,6 +254,9 @@ func Defaults() Settings {
 		Language:       "zh-CN",
 		Theme:          "light",
 		Psiphon:        PsiphonSettings{Enabled: false, Region: "", Mode: "cdn"},
+		// Psiphon is opt-in: a fresh install never runs it, and neither does
+		// "launch with Windows" — that starts the client only.
+		Exit:           ExitDefault,
 	}
 }
 

@@ -36,9 +36,9 @@ var Protocols = []Protocol{
 	// stays reachable for networks where QUIC gets through.
 	{Key: "mim", Label: "MASQUE-in-MASQUE", Mode: string(config.ModeMasqueH3), Proto: "mim", UseH2: true},
 	{Key: "gool", Label: "Gool", Mode: string(config.ModeGool), Proto: "gool"},
-	// Psiphon ships inside the core (2.1.0+): no tunnel of its own, the
-	// configured SOCKS port just leaves through psiphon.
-	{Key: "psiphon", Label: "Psiphon", Mode: string(config.ModePsiphon), Proto: "psiphon"},
+	// Psiphon is deliberately NOT a transport: it is an egress choice made on
+	// the home screen (Settings.Exit), kept separate so that picking a
+	// protocol can never start a third-party process on its own.
 	{Key: "auto", Label: "自动最佳", Mode: string(config.ModeAuto), Proto: ""},
 }
 
@@ -55,8 +55,6 @@ func ProtocolByKey(key string) (Protocol, bool) {
 // ProtocolKey maps the persisted settings onto a switcher entry.
 func ProtocolKey(s config.Settings) string {
 	switch {
-	case vpn.IsPsiphon(s):
-		return "psiphon"
 	case s.Protocol == "mim":
 		return "mim"
 	case s.Mode == config.ModeGool || s.Protocol == "gool":

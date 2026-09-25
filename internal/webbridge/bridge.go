@@ -167,6 +167,7 @@ func (b *Bridge) Handler() http.Handler {
 	mux.HandleFunc("/api/core/stop", b.guard(b.coreStop))
 	mux.HandleFunc("/api/settings", b.guard(b.settings))
 	mux.HandleFunc("/api/settings/psiphon", b.guard(b.setPsiphon))
+	mux.HandleFunc("/api/settings/exit", b.guard(b.setExit))
 	mux.HandleFunc("/api/psiphon/regions", b.guard(b.psiphonRegions))
 	mux.HandleFunc("/api/logs/clear", b.guard(b.clearLogs))
 	mux.HandleFunc("/api/client-log", b.guard(b.clientLog))
@@ -416,6 +417,36 @@ func (b *Bridge) setPsiphon(w http.ResponseWriter, r *http.Request) {
 	logx.Infof("[Psiphon] settings: enabled=%v region=%q mode=%q",
 		s.Psiphon.Enabled, s.Psiphon.Region, s.Psiphon.Mode)
 	writeJSON(w, http.StatusOK, s.Psiphon)
+}
+
+// setExit switches the egress between the tunnel itself and psiphon. This is
+// the only switch that can start psiphon, and it is a deliberate user action —
+// never a side effect of launching the app (including "launch with Windows").
+func (b *Bridge) setExit(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Exit string `json:"exit"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	mode := config.ExitMode(body.Exit)
+	if mode != config.ExitDefault && mode != config.ExitPsiphon {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown exit " + body.Exit})
+		return
+	}
+	s := b.app.Settings
+	s.Exit = mode
+	// Picking Psiphon as the egress is the user opting in; switching back to
+	// the default egress leaves the feature switch as it is.
+	if mode == config.ExitPsiphon {
+		s.Psiphon.Enabled = true
+	}
+	if err := b.app.SaveSettings(s); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	logx.Infof("[Psiphon] egress -> %s (enabled=%v, region=%q)", mode, s.Psiphon.Enabled, s.Psiphon.Region)
+	writeJSON(w, http.StatusOK, map[string]any{"exit": s.Exit, "psiphon": s.Psiphon})
 }
 
 func (b *Bridge) setMode(w http.ResponseWriter, r *http.Request) {

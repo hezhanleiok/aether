@@ -351,9 +351,13 @@ func argsFor(s config.Settings) []string {
 // ArgsFor exposes the derived arguments (tests, smoke runs).
 func ArgsFor(s config.Settings) []string { return argsFor(s) }
 
-// IsPsiphon reports whether the user picked the standalone Psiphon transport.
+// IsPsiphon reports whether the egress goes through psiphon.
+//
+// This is the one and only gate that may start psiphon: the user has to pick
+// it as the egress *and* have the feature enabled. Starting the app, launching
+// with Windows, or auto-connecting with the default egress must never do it.
 func IsPsiphon(s config.Settings) bool {
-	return s.Mode == config.ModePsiphon || s.Protocol == "psiphon"
+	return s.Exit == config.ExitPsiphon && s.Psiphon.Enabled
 }
 
 // IsSlowMasque reports whether the selected transport needs the full MASQUE
