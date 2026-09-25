@@ -213,6 +213,16 @@ func envFor(s config.Settings) map[string]string {
 	// happily picks the first endpoint that answers a probe and ends up with
 	// rtt ≈5.9s (and, on IPv4-only, sometimes none at all), while ironclad
 	// measured ≈970ms and connected in 77s instead of 256s.
+	// Leaving AETHER_SCAN empty hands the choice back to the core, which
+	// defaults to balanced — and balanced keeps sweeping candidates until its
+	// whole budget runs out before committing. Measured here that is a 120s
+	// wait for the very gateway turbo picks in 3s. An explicit choice is
+	// always respected; only the default had no reason to be that slow.
+	// Note: turbo was tried here to cut the wait (4s vs 120s, verified working),
+	// but it gives up too early whenever endpoints sit in cooldown — measured
+	// here it then fails every retry, while the default keeps probing. Leave the
+	// core its own choice unless the user picked one; users who want the fast
+	// sweep can still select turbo in the scan-mode setting.
 	if IsSlowMasque(s) && s.ScanMode == "" {
 		set("AETHER_SCAN", "ironclad")
 	} else {
@@ -305,6 +315,16 @@ func EnvFor(s config.Settings) map[string]string { return envFor(s) }
 // and MIM validates an inner hop on top of the outer one.
 func IsSlowMasque(s config.Settings) bool {
 	return s.Mode == config.ModeMasqueH2 || s.Protocol == "mim"
+}
+
+// IsMasqueClass reports whether the active transport is MASQUE-based, whether
+// it rides HTTP/3 or HTTP/2.
+func IsMasqueClass(s config.Settings) bool {
+	switch s.Mode {
+	case config.ModeMasqueH2, config.ModeMasqueH3:
+		return true
+	}
+	return s.Protocol == "masque" || s.Protocol == "mim"
 }
 
 // Connect launches the core through the Core Controller.

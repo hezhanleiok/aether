@@ -365,10 +365,12 @@ func (a *App) connectWatchdog() {
 	if s := a.Settings; s.ConnectTimeout > 0 {
 		timeout = time.Duration(s.ConnectTimeout)*time.Second + 120*time.Second
 	}
-	// MASQUE H2 and MIM need the prober's whole 120s scan plus a fragmented TLS
-	// handshake per hop (measured: H2 ≈126s, MIM ≈174s). The generic budget
-	// stops them moments before they would come up, so give them real headroom.
-	if vpn.IsSlowMasque(a.Settings) && timeout < 300*time.Second {
+	// MASQUE commits to a gateway only after the prober has swept its budget,
+	// then handshakes on top (measured: a balanced sweep ≈120s to select, H2
+	// ≈126s, MIM ≈174s). The generic budget can therefore cut a connect off
+	// moments before it would come up — which looks exactly like "this protocol
+	// is broken". Every MASQUE transport gets real headroom, not just H2/MIM.
+	if timeout < 300*time.Second && vpn.IsMasqueClass(a.Settings) {
 		timeout = 300 * time.Second
 	}
 	deadline := time.Now().Add(timeout)

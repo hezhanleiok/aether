@@ -97,6 +97,11 @@ version.json 远程控制。
 
     Write-Utf8 (Join-Path $stage "CHANGELOG.txt") @"
 $Version
+  - 修复 MASQUE 连不上（连接超时预算不足，跑不满网关搜索即被判失败）
+  - WireGuard / Gool / MasqueH2 / MasqueH3 回归实测跑通真实流量
+  - 授权到期时间延长至 2026-10-01
+
+1.1.4
   - 修复 Gool（WARP-in-WARP）连接成功后反复断开重连（不再因出口地区主动断开）
   - 内置 Aether 核心升级至官方最新稳定版 v2.1.0
 
