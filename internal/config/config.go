@@ -23,7 +23,68 @@ const (
 	ModeMasqueH2  Mode = "masque_h2" // MASQUE on HTTP/2 (TCP)
 	ModeMasqueH3  Mode = "masque_h3" // MASQUE on HTTP/3 (QUIC)
 	ModeAuto      Mode = "auto"      // auto transport selection
+	ModePsiphon   Mode = "psiphon"   // Psiphon, carried by the core itself (v2.1.0+)
 )
+
+// PsiphonRegion is one entry of the country picker. The code is what the core
+// receives (--psiphon-region <cc>); "" means "let Psiphon choose".
+type PsiphonRegion struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+	Flag string `json:"flag"`
+}
+
+// PsiphonRegions is the single source of truth for the picker — the settings
+// UI, the home screen and the log all read from here, so adding a country is
+// a one-line change and can never drift between screens.
+//
+// These are *requests*, not guarantees: Psiphon picks an egress server from
+// what it currently has, so the country that comes back may differ.
+var PsiphonRegions = []PsiphonRegion{
+	{Code: "", Name: "自动", Flag: "🌐"},
+	{Code: "US", Name: "United States", Flag: "🇺🇸"},
+	{Code: "DE", Name: "Germany", Flag: "🇩🇪"},
+	{Code: "JP", Name: "Japan", Flag: "🇯🇵"},
+	{Code: "NL", Name: "Netherlands", Flag: "🇳🇱"},
+	{Code: "SG", Name: "Singapore", Flag: "🇸🇬"},
+	{Code: "GB", Name: "United Kingdom", Flag: "🇬🇧"},
+	{Code: "FR", Name: "France", Flag: "🇫🇷"},
+	{Code: "CA", Name: "Canada", Flag: "🇨🇦"},
+	{Code: "AU", Name: "Australia", Flag: "🇦🇺"},
+	{Code: "KR", Name: "South Korea", Flag: "🇰🇷"},
+}
+
+// RegionLabel returns the human name for a code ("自动" when unset).
+func RegionLabel(code string) string {
+	for _, r := range PsiphonRegions {
+		if r.Code == code {
+			return r.Name
+		}
+	}
+	if code == "" {
+		return "自动"
+	}
+	return code
+}
+
+// RegionFlag returns the flag emoji for a code.
+func RegionFlag(code string) string {
+	for _, r := range PsiphonRegions {
+		if r.Code == code {
+			return r.Flag
+		}
+	}
+	return "🌐"
+}
+
+// PsiphonSettings holds the Psiphon-specific options. Psiphon ships inside the
+// core (v2.1.0+), so the client keeps no server list, credentials or keys —
+// it only picks a country and a fronting shape.
+type PsiphonSettings struct {
+	Enabled bool   `json:"enabled"`
+	Region  string `json:"region"` // "" | US | DE | JP | ...
+	Mode    string `json:"mode"`   // "" (auto) | cdn | direct
+}
 
 // IPMode controls IPv4/IPv6 scanning and connectivity.
 type IPMode string
@@ -108,6 +169,10 @@ type Settings struct {
 	CoreKind      string   `json:"core_kind"`       // preferred backend: "" | process | library
 	CoreExtraArgs []string `json:"core_extra_args"` // extra CLI args appended on start
 
+	// Psiphon: carried inside the core, so the client holds no server list,
+	// credentials or keys — only the requested country and fronting shape.
+	Psiphon PsiphonSettings `json:"psiphon"`
+
 	// Advanced
 	LogLevel       string `json:"log_level"`       // error..trace
 	ConnectTimeout int    `json:"connect_timeout"` // seconds
@@ -171,6 +236,7 @@ func Defaults() Settings {
 		Keepalive:      5,
 		Language:       "zh-CN",
 		Theme:          "light",
+		Psiphon:        PsiphonSettings{Enabled: false, Region: "", Mode: "cdn"},
 	}
 }
 

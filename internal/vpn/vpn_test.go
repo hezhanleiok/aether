@@ -60,6 +60,9 @@ func TestEnvForSplitRulesAndLAN(t *testing.T) {
 
 func TestEnvForPinnedGateway(t *testing.T) {
 	s := config.Defaults()
+	// A pin comes from the node pool, which is probed as WireGuard-class
+	// endpoints, so it may only be handed to the WireGuard transport.
+	s.Mode = config.ModeWARP
 	s.CachedGateway = "162.159.192.1:2408"
 	s.AutoScan = false
 	env := envFor(s)
@@ -71,6 +74,15 @@ func TestEnvForPinnedGateway(t *testing.T) {
 	env = envFor(s)
 	if _, ok := env["AETHER_PEER"]; ok {
 		t.Error("auto scan must not pin a peer")
+	}
+	// A MASQUE-class transport must never receive a WireGuard address: forcing
+	// one makes the TLS handshake fail and the core then retries that same
+	// gateway until the watchdog gives up.
+	s.AutoScan = false
+	s.Mode = config.ModeMasqueH3
+	env = envFor(s)
+	if _, ok := env["AETHER_PEER"]; ok {
+		t.Error("masque must not be pinned to a wireguard endpoint")
 	}
 }
 

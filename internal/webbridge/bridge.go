@@ -166,6 +166,8 @@ func (b *Bridge) Handler() http.Handler {
 	mux.HandleFunc("/api/core/restart", b.guard(b.coreRestart))
 	mux.HandleFunc("/api/core/stop", b.guard(b.coreStop))
 	mux.HandleFunc("/api/settings", b.guard(b.settings))
+	mux.HandleFunc("/api/settings/psiphon", b.guard(b.setPsiphon))
+	mux.HandleFunc("/api/psiphon/regions", b.guard(b.psiphonRegions))
 	mux.HandleFunc("/api/logs/clear", b.guard(b.clearLogs))
 	mux.HandleFunc("/api/client-log", b.guard(b.clientLog))
 	mux.HandleFunc("/api/system/open", b.guard(b.openExternal))
@@ -376,6 +378,44 @@ func applyProtocol(s config.Settings, p Protocol) config.Settings {
 	s.Protocol = p.Proto
 	s.UseH2 = p.UseH2
 	return s
+}
+
+// psiphonRegions serves the country picker. It lives in one place (config) so
+// the picker and the home screen can never disagree.
+func (b *Bridge) psiphonRegions(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"regions": config.PsiphonRegions})
+}
+
+// setPsiphon updates the Psiphon block only. The country is a *request*: it is
+// passed to the core as --psiphon-region and psiphon picks a server from what
+// it currently has, which may be another country. Nothing here reconnects on a
+// mismatch — the UI shows requested vs actual and leaves the choice to the user.
+func (b *Bridge) setPsiphon(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled *bool   `json:"enabled"`
+		Region  *string `json:"region"`
+		Mode    *string `json:"mode"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	s := b.app.Settings
+	if body.Enabled != nil {
+		s.Psiphon.Enabled = *body.Enabled
+	}
+	if body.Region != nil {
+		s.Psiphon.Region = *body.Region
+	}
+	if body.Mode != nil {
+		s.Psiphon.Mode = *body.Mode
+	}
+	if err := b.app.SaveSettings(s); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	logx.Infof("[Psiphon] settings: enabled=%v region=%q mode=%q",
+		s.Psiphon.Enabled, s.Psiphon.Region, s.Psiphon.Mode)
+	writeJSON(w, http.StatusOK, s.Psiphon)
 }
 
 func (b *Bridge) setMode(w http.ResponseWriter, r *http.Request) {

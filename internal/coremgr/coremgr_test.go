@@ -15,6 +15,7 @@ type fakeBackend struct {
 	versionErr error
 	startErr   error
 	env        map[string]string
+	args       []string
 	events     chan CoreEvent
 	stopCalls  int
 	tap        func(CoreEvent)
@@ -37,10 +38,15 @@ func (f *fakeBackend) ProbeVersion(ctx context.Context, p string) (string, error
 }
 
 func (f *fakeBackend) Start(env map[string]string, wd string) (Session, error) {
+	return f.StartWithArgs(env, nil, wd)
+}
+
+func (f *fakeBackend) StartWithArgs(env map[string]string, args []string, wd string) (Session, error) {
 	if f.startErr != nil {
 		return nil, f.startErr
 	}
 	f.env = env
+	f.args = args
 	f.events = make(chan CoreEvent, 16)
 	return &fakeSession{b: f, done: make(chan struct{})}, nil
 }

@@ -171,6 +171,16 @@ func (s *processSession) Stop() error {
 		if s.cmd != nil && s.cmd.Process != nil {
 			err = s.cmd.Process.Kill()
 		}
+		// Psiphon spawns psiphon-tunnel-core.exe, which outlives the core and
+		// keeps holding the SOCKS port — the next connect then fails with
+		// "port already in use". Nothing else on this machine starts it.
+		kill := exec.Command("taskkill", "/F", "/IM", "psiphon-tunnel-core.exe")
+		kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+		if out, kerr := kill.CombinedOutput(); kerr != nil {
+			if !strings.Contains(strings.ToLower(string(out)), "not found") {
+				logx.Warnf("[coremgr] psiphon cleanup: %v", kerr)
+			}
+		}
 	})
 	return err
 }
@@ -179,8 +189,18 @@ func (s *processSession) Events() <-chan CoreEvent { return s.events }
 
 func (s *processSession) Done() <-chan struct{} { return s.done }
 
-// Start spawns the core with the given environment.
+// Start spawns the core with the given environment and no extra arguments.
 func (b *ProcessBackend) Start(env map[string]string, workDir string) (Session, error) {
+	return b.StartWithArgs(env, nil, workDir)
+}
+
+// StartWithArgs spawns the core with both an AETHER_* environment and real
+// command line arguments.
+//
+// Env-only was not enough for Psiphon: the core exposes it purely as flags
+// (--psiphon, --psiphon-region CC, --psiphon-mode cdn). Settings still travel
+// through the environment; only the mode switch goes on the command line.
+func (b *ProcessBackend) StartWithArgs(env map[string]string, args []string, workDir string) (Session, error) {
 	if workDir == "" {
 		workDir, _ = os.UserConfigDir()
 	}
@@ -196,9 +216,12 @@ func (b *ProcessBackend) Start(env map[string]string, workDir string) (Session, 
 		}
 	}
 
-	cmd := exec.Command(corePath)
+	cmd := exec.Command(corePath, args...)
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), envSlice(env)...)
+	if len(args) > 0 {
+		logx.Infof("[coremgr] starting core with args: %v", args)
+	}
 	// No console window flash when the GUI (windowsgui subsystem) spawns the
 	// console-mode core: CREATE_NO_WINDOW keeps aether.exe fully detached.
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
@@ -271,6 +294,32 @@ var classifyReReconnect = regexp.MustCompile("reconnecting|retrying|rescanning")
 // during the (long) MASQUE scan + fragmented TLS handshake.
 var classifyReProgress = regexp.MustCompile("fragmenting client hello|tls established|selected MASQUE gateway|best MASQUE gateway|MASQUE transport:|\\[h2\\] connecting|outer tunnel validated|inner tunnel validated")
 
+// Psiphon churns through candidate servers: one server's tunnel dying is how
+// it reconnects, not the session failing. Those lines must not flip the UI to
+// "failed" while psiphon is still up and serving 1819.
+var classifyRePsiphonReady = regexp.MustCompile("psiphon is ready|psiphon exit:")
+// Psiphon publishes the countries its servers can actually leave from. The
+// client's own list is only a convenience: this is the authoritative one.
+var classifyRePsiphonRegions = regexp.MustCompile(`psiphon can leave from:\s*([A-Z ,]+)`)
+
+// EgressRegions parses one "psiphon can leave from: DE GB US" line.
+func EgressRegions(line string) []string {
+	m := classifyRePsiphonRegions.FindStringSubmatch(line)
+	if m == nil {
+		return nil
+	}
+	var out []string
+	for _, f := range strings.Fields(m[1]) {
+		out = append(out, strings.Trim(f, ","))
+	}
+	return out
+}
+// Psiphon is noisy by nature: it rotates servers, retries meek, and logs an
+// accept error whenever a client drops a connection early. None of that means
+// the session is down — "psiphon is ready" and the exit line are the only
+// signals that matter, so the rest is ignored instead of failing the UI.
+var classifyRePsiphonNoise = regexp.MustCompile(`(?i)psiphon.*(meek round trip failed|SOCKS proxy accept error|AcceptSocks|tunnel failed|DoStatusRequest failed|operate tunnel error|close tunnel|connection attempt failed|Config migration|boltdb)`)
+
 // Aether reports fatal startup failures on stderr as either "[-] ..." or
 // "Error: Other(...)".  The latter includes bind failures (for example a
 // stale client already owning the SOCKS port) and must never be mistaken for
@@ -282,6 +331,10 @@ func classify(line string) (kind string, ok bool) {
 	switch {
 	case classifyReIdentity.MatchString(t):
 		return "identity", true
+	// Psiphon announces itself differently: there is no tunnel underneath, so
+	// "psiphon is ready" is the equivalent of the socks listener coming up.
+	case classifyRePsiphonReady.MatchString(t):
+		return "connected", true
 	case classifyReConnected.MatchString(t):
 		return "connected", true
 	case classifyReCandidate.MatchString(t):
@@ -299,6 +352,12 @@ func classify(line string) (kind string, ok bool) {
 	// is still recovering on its own.
 	case classifyReReconnect.MatchString(t):
 		return "reconnect", true
+	// Psiphon housekeeping (server rotation, meek retries, accept errors):
+	// ignore it entirely rather than letting it fail or churn the UI.
+	case classifyRePsiphonNoise.MatchString(t):
+		return "", false
+	case classifyRePsiphonRegions.MatchString(t):
+		return "psiphon_regions", true
 	case classifyReFail.MatchString(t):
 		return "failed", true
 	}

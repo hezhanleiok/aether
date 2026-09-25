@@ -39,6 +39,10 @@ type State struct {
 	LatencyMs   int64       `json:"latency_ms"`
 	Gateway     string      `json:"gateway"`
 	Transport   string      `json:"transport"`
+	// PsiphonRegions is the set of countries psiphon reported it can leave
+	// from right now. The picker shows the client's own list, but this is the
+	// authoritative one — it changes as psiphon's servers come and go.
+	PsiphonRegions []string `json:"psiphon_regions"`
 	Error       string      `json:"error"`
 	StartedAt   time.Time   `json:"started_at"`
 	CoreRunning bool        `json:"core_running"`
@@ -52,6 +56,11 @@ type Manager struct {
 	subMu  sync.Mutex
 	subs   []func(State)
 	stopCh chan struct{}
+
+	// lastMasqueGW is a MASQUE gateway the core already proved usable. MIM's
+	// own sweep often comes back with "no clean endpoint", but handing it a
+	// known-good outer edge connects in seconds (measured: ~15s vs never).
+	lastMasqueGW string
 }
 
 // New creates a manager around a Core Controller.
@@ -309,6 +318,44 @@ func envFor(s config.Settings) map[string]string {
 // EnvFor exposes the derived environment (tests, smoke runs).
 func EnvFor(s config.Settings) map[string]string { return envFor(s) }
 
+// argsFor derives the command line arguments for the core. Only switches with
+// no environment equivalent live here; everything else rides envFor.
+//
+// Psiphon is the reason this exists. It is exposed purely as flags, and the
+// shape matters, measured against core 2.1.0:
+//
+//	--psiphon        chains psiphon *inside* the tunnel and serves it on its
+//	                 own --psiphon-bind (1821); it needs a working WARP/MASQUE
+//	                 tunnel underneath first, and 1819 is not the psiphon exit.
+//	--psiphon-only   no tunnel at all; 1819 itself leaves through psiphon.
+//
+// The client's exit detection probes the configured SOCKS port, so only the
+// second shape reports the real psiphon egress and reuses the existing
+// proxy / DNS / system-proxy plumbing unchanged.
+func argsFor(s config.Settings) []string {
+	if !IsPsiphon(s) {
+		return nil
+	}
+	args := []string{"--psiphon-only"}
+	if r := strings.TrimSpace(s.Psiphon.Region); r != "" {
+		args = append(args, "--psiphon-region", r)
+	}
+	// "auto" is the core's own default, so only an explicit shape is worth
+	// spending a flag on.
+	if m := strings.TrimSpace(s.Psiphon.Mode); m != "" && m != "auto" {
+		args = append(args, "--psiphon-mode", m)
+	}
+	return args
+}
+
+// ArgsFor exposes the derived arguments (tests, smoke runs).
+func ArgsFor(s config.Settings) []string { return argsFor(s) }
+
+// IsPsiphon reports whether the user picked the standalone Psiphon transport.
+func IsPsiphon(s config.Settings) bool {
+	return s.Mode == config.ModePsiphon || s.Protocol == "psiphon"
+}
+
 // IsSlowMasque reports whether the selected transport needs the full MASQUE
 // gateway scan plus a fragmented TLS handshake, i.e. whether the slow-path
 // budgets apply. Both MASQUE H2 (TCP/443) and MASQUE-in-MASQUE run the prober,
@@ -354,7 +401,26 @@ func (m *Manager) Connect(s config.Settings) error {
 	}
 
 	env := envFor(s)
-	sess, err := m.core.Start(env, config.Dir())
+	// MIM's own sweep often ends with "no clean endpoint". Handing it a gateway
+	// the core already proved on a single-hop MASQUE run brings the outer hop up
+	// in seconds (measured ~15s vs never); the core still rescans if it is stale.
+	if s.Protocol == "mim" {
+		m.mu.RLock()
+		gw := m.lastMasqueGW
+		m.mu.RUnlock()
+		if gw != "" {
+			env["AETHER_MIM_OUTER_PEER"] = gw
+			logx.Infof("[vpn] MIM: reusing proven outer gateway %s", gw)
+		}
+	}
+	args := argsFor(s)
+	if IsPsiphon(s) {
+		// Psiphon is a request, not a guarantee: the country is asked for,
+		// and whatever psiphon actually picks is what the exit check reports.
+		logx.Infof("[Psiphon] starting region=%q mode=%q", s.Psiphon.Region, s.Psiphon.Mode)
+		logx.Infof("[Psiphon] args: %v", args)
+	}
+	sess, err := m.core.StartArgs(env, args, config.Dir())
 	if err != nil {
 		m.set(StatusFailed, func(st *State) { st.Error = err.Error() })
 		return err
@@ -403,6 +469,13 @@ func (m *Manager) pump(sess coremgr.Session) {
 			}
 		case "reconnect":
 			m.set(StatusReconnecting, nil)
+		case "psiphon_regions":
+			// Psiphon's own list wins over the client's static one: it is what
+			// the servers can actually offer at this moment.
+			if regs := coremgr.EgressRegions(ev.Line); len(regs) > 0 {
+				logx.Infof("[Psiphon] available regions: %v", regs)
+				m.set(m.State().Status, func(st *State) { st.PsiphonRegions = regs })
+			}
 		case "failed":
 			m.set(StatusFailed, func(st *State) { st.Error = ev.Line })
 		case "stopped":
@@ -458,6 +531,14 @@ func (m *Manager) SetTesting(on bool) {
 func (m *Manager) SetGateway(gw string) {
 	m.mu.Lock()
 	m.st.Gateway = gw
+	// Remember MASQUE-class gateways only: MIM reuses one as its outer hop,
+	// and a WireGuard endpoint would be the wrong address family for that.
+	if gw != "" {
+		switch m.st.Mode {
+		case config.ModeMasqueH2, config.ModeMasqueH3:
+			m.lastMasqueGW = gw
+		}
+	}
 	m.mu.Unlock()
 	m.publish()
 }

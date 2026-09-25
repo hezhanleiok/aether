@@ -36,6 +36,9 @@ var Protocols = []Protocol{
 	// stays reachable for networks where QUIC gets through.
 	{Key: "mim", Label: "MASQUE-in-MASQUE", Mode: string(config.ModeMasqueH3), Proto: "mim", UseH2: true},
 	{Key: "gool", Label: "Gool", Mode: string(config.ModeGool), Proto: "gool"},
+	// Psiphon ships inside the core (2.1.0+): no tunnel of its own, the
+	// configured SOCKS port just leaves through psiphon.
+	{Key: "psiphon", Label: "Psiphon", Mode: string(config.ModePsiphon), Proto: "psiphon"},
 	{Key: "auto", Label: "自动最佳", Mode: string(config.ModeAuto), Proto: ""},
 }
 
@@ -52,6 +55,8 @@ func ProtocolByKey(key string) (Protocol, bool) {
 // ProtocolKey maps the persisted settings onto a switcher entry.
 func ProtocolKey(s config.Settings) string {
 	switch {
+	case vpn.IsPsiphon(s):
+		return "psiphon"
 	case s.Protocol == "mim":
 		return "mim"
 	case s.Mode == config.ModeGool || s.Protocol == "gool":
@@ -104,6 +109,9 @@ type VPNInfo struct {
 	StartedAt    time.Time `json:"startedAt"`
 	DurationSec  int64     `json:"durationSec"`
 	LocalIP      string    `json:"localIP"`
+	// PsiphonRegions is what psiphon says it can leave from right now; the UI
+	// treats it as authoritative over the built-in country list.
+	PsiphonRegions []string `json:"psiphonRegions"`
 }
 
 // TrafficInfo is the throughput block (live + cumulative).
@@ -186,6 +194,7 @@ func (b *Bridge) snapshot() Snapshot {
 			StartedAt:    st.StartedAt,
 			DurationSec:  dur,
 			LocalIP:      localIPv4(),
+			PsiphonRegions: st.PsiphonRegions,
 		},
 		Traffic: TrafficInfo{
 			DownBps:     tr.DownBytesPerSec,

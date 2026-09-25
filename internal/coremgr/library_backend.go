@@ -157,6 +157,12 @@ func (s *librarySession) Done() <-chan struct{} { return s.stopped }
 
 // Start runs aether_core_start with a JSON argv and polls the job.
 func (b *LibraryBackend) Start(env map[string]string, workDir string) (Session, error) {
+	return b.StartWithArgs(env, nil, workDir)
+}
+
+// StartWithArgs is Start plus command line arguments, marshalled into the
+// argv the library core expects (same switch names as the exe).
+func (b *LibraryBackend) StartWithArgs(env map[string]string, args []string, workDir string) (Session, error) {
 	dllPath := os.Getenv("AETHER_CORE_DLL")
 	if dllPath == "" {
 		if found, err := b.Locate(""); err == nil {
@@ -172,7 +178,10 @@ func (b *LibraryBackend) Start(env map[string]string, workDir string) (Session, 
 	for k, v := range env {
 		_ = syscall.Setenv(k, v)
 	}
-	argv, _ := json.Marshal([]string{})
+	if args == nil {
+		args = []string{}
+	}
+	argv, _ := json.Marshal(args)
 	pargv, err := syscall.BytePtrFromString(string(argv))
 	if err != nil {
 		return nil, err

@@ -52,6 +52,16 @@ try {
 
     Copy-Item (Join-Path $build "AetherVPN.exe") (Join-Path $stage "AetherVPN.exe") -Force
     Copy-Item (Join-Path $root "core-bin\aether.exe") (Join-Path $stage "core-bin\aether.exe") -Force
+# Psiphon (core 2.1.0+) needs the official console clients shipped in the
+# release archive: the core looks for a 'pt' folder beside itself and refuses
+# to start psiphon without it. They are part of the official archive, not a
+# second program the client adds.
+$ptSrc = Join-Path $root "core-bin\pt"
+if (Test-Path $ptSrc) {
+    Copy-Item $ptSrc (Join-Path $stage "core-bin\pt") -Recurse -Force
+} else {
+    Write-Warning "core-bin\pt missing — Psiphon will not start in this package"
+}
 
     # Both binaries are pure Go (CGO_ENABLED=0, no `import "C"` anywhere), so
     # they are statically linked and need no third-party DLLs or runtime files

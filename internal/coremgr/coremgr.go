@@ -79,6 +79,9 @@ type Backend interface {
 	ProbeVersion(ctx context.Context, corePath string) (string, error)
 	// Start launches a session with the given AETHER_* environment.
 	Start(env map[string]string, workDir string) (Session, error)
+	// StartWithArgs is Start plus command line arguments. Psiphon lives behind
+	// flags only (--psiphon, --psiphon-region), so the env alone cannot reach it.
+	StartWithArgs(env map[string]string, args []string, workDir string) (Session, error)
 }
 
 // Manager is the GUI-facing Core Controller.
@@ -142,13 +145,19 @@ func (m *Manager) Detect(corePath string) (Health, error) {
 // is wired into the backend so events are mirrored without competing for the
 // channel.
 func (m *Manager) Start(env map[string]string, workDir string) (Session, error) {
+	return m.StartArgs(env, nil, workDir)
+}
+
+// StartArgs launches the core with command line arguments on top of the
+// AETHER_* environment (Psiphon needs the --psiphon family of flags).
+func (m *Manager) StartArgs(env map[string]string, args []string, workDir string) (Session, error) {
 	if m.health != HealthReady && m.health != HealthRunning {
 		return nil, ErrNotReady
 	}
 	if m.session != nil {
 		return nil, ErrAlreadyRunning
 	}
-	s, err := m.backend.Start(env, workDir)
+	s, err := m.backend.StartWithArgs(env, args, workDir)
 	if err != nil {
 		return nil, err
 	}
