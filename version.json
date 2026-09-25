@@ -1,8 +1,8 @@
 {
   "gui": {
-    "version": "1.1.7",
-    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.7/AetherVPN-1.1.7-win-x64.zip",
-    "notes": "Psiphon 改为独立出口方式，默认关闭；客户端启动不再拉起 Psiphon 组件"
+    "version": "1.1.8",
+    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.8/AetherVPN-1.1.8-win-x64.zip",
+    "notes": "修复 Psiphon 出口下浏览器无法上网（HTTP 代理端口未监听）"
   },
   "core": {
     "version": "v2.1.0",

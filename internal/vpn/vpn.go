@@ -337,6 +337,14 @@ func argsFor(s config.Settings) []string {
 		return nil
 	}
 	args := []string{"--psiphon-only"}
+	// In psiphon mode the core serves SOCKS on the configured port but the
+	// HTTP/CONNECT listener does not come up on its own — verified: with
+	// --psiphon-only only 1819 listens, 1820 stays closed. The client points
+	// the system proxy at the HTTP port, so without this the tunnel is up yet
+	// every browser request fails ("connected but no pages load").
+	if s.HTTPProxyPort > 0 {
+		args = append(args, "--psiphon-http", fmt.Sprintf("127.0.0.1:%d", s.HTTPProxyPort))
+	}
 	if r := strings.TrimSpace(s.Psiphon.Region); r != "" {
 		args = append(args, "--psiphon-region", r)
 	}

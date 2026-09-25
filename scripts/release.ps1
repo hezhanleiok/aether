@@ -107,6 +107,12 @@ version.json 远程控制。
 
     Write-Utf8 (Join-Path $stage "CHANGELOG.txt") @"
 $Version
+  - 修复 Psiphon 出口下浏览器无法上网（HTTP 代理端口未监听，已加 --psiphon-http）
+
+1.1.7
+  - Psiphon 改为独立出口方式，默认关闭；客户端启动不再拉起 Psiphon 组件
+
+1.1.6
   - 修复 MASQUE 连不上（连接超时预算不足，跑不满网关搜索即被判失败）
   - WireGuard / Gool / MasqueH2 / MasqueH3 回归实测跑通真实流量
   - 授权到期时间延长至 2026-10-01
