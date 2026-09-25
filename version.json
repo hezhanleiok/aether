@@ -2,7 +2,7 @@
   "gui": {
     "version": "1.1.5",
     "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.5/AetherVPN-1.1.5-win-x64.zip",
-    "notes": "修复 MASQUE 连接被误判失败（超时预算不足），六种传输全部回归通过"
+    "notes": "修复 MASQUE 连不上（连接超时预算不足而误判失败）；WireGuard / Gool / MasqueH2 / MasqueH3 实测跑通"
   },
   "core": {
     "version": "v2.1.0",
