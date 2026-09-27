@@ -1,4 +1,4 @@
-# Builds the Windows release: portable ZIP + installer, plus checksums, and
+﻿# Builds the Windows release: portable ZIP + installer, plus checksums, and
 # (with -Token) publishes it as a GitHub release.
 #
 #   .\scripts\release.ps1                     # build only
