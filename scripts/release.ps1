@@ -97,8 +97,14 @@ version.json 远程控制。
 
     Write-Utf8 (Join-Path $stage "CHANGELOG.txt") @"
 $Version
+  - 移除赛风（Psiphon），相关代码、资源与运行时数据全部清除
+  - 修复系统代理被写入死地址 127.0.0.1:1，导致所有网页打不开
+  - 内置核心重装为官方 v2.1.0（SHA256 与官方一致）
+  - MasqueH2 与 MIM 在当前网络下无法连接，界面如实标注
+  - 修复启动闪现的黑框（改为 GUI 子系统构建）
+
+1.1.5
   - 修复 MASQUE 连不上（连接超时预算不足，跑不满网关搜索即被判失败）
-  - WireGuard / Gool / MasqueH2 / MasqueH3 回归实测跑通真实流量
   - 授权到期时间延长至 2026-10-01
 
 1.1.4
@@ -150,7 +156,24 @@ $Version
 
     # -------------------------------------------------------------- Package
     Write-Host "[4/6] Package" -ForegroundColor Cyan
-    Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
+    # A freshly copied 17MB network binary is often still locked by real-time AV
+    # scanning. Compress-Archive then skips it and reports only a non-terminating
+    # error, so the build "succeeds" with a zip that has no core in it. Retry
+    # until the archive really holds every staged file, and fail loudly if it
+    # never does.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $stagedCount = (Get-ChildItem -Path $stage -Recurse -File).Count
+    $packed = @()
+    for ($i = 1; $i -le 10; $i++) {
+        Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force -ErrorAction SilentlyContinue
+        $za = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        try { $packed = @($za.Entries | ForEach-Object { $_.FullName }) } finally { $za.Dispose() }
+        if ($packed.Count -ge $stagedCount) { break }
+        Write-Host "      retry ${i}: archive has $($packed.Count)/$stagedCount files, waiting out the file lock"
+        Start-Sleep -Seconds 3
+    }
+    if ($packed.Count -lt $stagedCount) { throw "portable zip incomplete: $($packed.Count)/$stagedCount files" }
+    Write-Host "      zip has $($packed.Count)/$stagedCount files"
     Copy-Item $zip $payload -Force
     go build -ldflags="-H=windowsgui" -o $setup ./cmd/aethersetup
     if ($LASTEXITCODE -ne 0) { throw "installer build failed" }

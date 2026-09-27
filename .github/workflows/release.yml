@@ -49,7 +49,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path core-bin | Out-Null
           $tmp = Join-Path $env:RUNNER_TEMP 'core'
           $zip = Join-Path $env:RUNNER_TEMP 'core.zip'
-          Invoke-WebRequest -Uri 'https://github.com/CluvexStudio/Aether/releases/download/v2.0.0/aether-windows-x86_64.zip' -OutFile $zip
+          Invoke-WebRequest -Uri 'https://github.com/CluvexStudio/Aether/releases/download/v2.1.0/aether-windows-x86_64.zip' -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath $tmp -Force
           $exe = Get-ChildItem $tmp -Recurse -Filter 'aether.exe' | Select-Object -First 1
           if (-not $exe) { throw 'aether.exe not found in the official archive' }
