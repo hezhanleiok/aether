@@ -166,9 +166,6 @@ func (b *Bridge) Handler() http.Handler {
 	mux.HandleFunc("/api/core/restart", b.guard(b.coreRestart))
 	mux.HandleFunc("/api/core/stop", b.guard(b.coreStop))
 	mux.HandleFunc("/api/settings", b.guard(b.settings))
-	mux.HandleFunc("/api/settings/psiphon", b.guard(b.setPsiphon))
-	mux.HandleFunc("/api/settings/exit", b.guard(b.setExit))
-	mux.HandleFunc("/api/psiphon/regions", b.guard(b.psiphonRegions))
 	mux.HandleFunc("/api/logs/clear", b.guard(b.clearLogs))
 	mux.HandleFunc("/api/client-log", b.guard(b.clientLog))
 	mux.HandleFunc("/api/system/open", b.guard(b.openExternal))
@@ -379,74 +376,6 @@ func applyProtocol(s config.Settings, p Protocol) config.Settings {
 	s.Protocol = p.Proto
 	s.UseH2 = p.UseH2
 	return s
-}
-
-// psiphonRegions serves the country picker. It lives in one place (config) so
-// the picker and the home screen can never disagree.
-func (b *Bridge) psiphonRegions(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"regions": config.PsiphonRegions})
-}
-
-// setPsiphon updates the Psiphon block only. The country is a *request*: it is
-// passed to the core as --psiphon-region and psiphon picks a server from what
-// it currently has, which may be another country. Nothing here reconnects on a
-// mismatch — the UI shows requested vs actual and leaves the choice to the user.
-func (b *Bridge) setPsiphon(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Enabled *bool   `json:"enabled"`
-		Region  *string `json:"region"`
-		Mode    *string `json:"mode"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	s := b.app.Settings
-	if body.Enabled != nil {
-		s.Psiphon.Enabled = *body.Enabled
-	}
-	if body.Region != nil {
-		s.Psiphon.Region = *body.Region
-	}
-	if body.Mode != nil {
-		s.Psiphon.Mode = *body.Mode
-	}
-	if err := b.app.SaveSettings(s); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	logx.Infof("[Psiphon] settings: enabled=%v region=%q mode=%q",
-		s.Psiphon.Enabled, s.Psiphon.Region, s.Psiphon.Mode)
-	writeJSON(w, http.StatusOK, s.Psiphon)
-}
-
-// setExit switches the egress between the tunnel itself and psiphon. This is
-// the only switch that can start psiphon, and it is a deliberate user action —
-// never a side effect of launching the app (including "launch with Windows").
-func (b *Bridge) setExit(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Exit string `json:"exit"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	mode := config.ExitMode(body.Exit)
-	if mode != config.ExitDefault && mode != config.ExitPsiphon {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown exit " + body.Exit})
-		return
-	}
-	s := b.app.Settings
-	s.Exit = mode
-	// Picking Psiphon as the egress is the user opting in; switching back to
-	// the default egress leaves the feature switch as it is.
-	if mode == config.ExitPsiphon {
-		s.Psiphon.Enabled = true
-	}
-	if err := b.app.SaveSettings(s); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	logx.Infof("[Psiphon] egress -> %s (enabled=%v, region=%q)", mode, s.Psiphon.Enabled, s.Psiphon.Region)
-	writeJSON(w, http.StatusOK, map[string]any{"exit": s.Exit, "psiphon": s.Psiphon})
 }
 
 func (b *Bridge) setMode(w http.ResponseWriter, r *http.Request) {

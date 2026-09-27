@@ -354,7 +354,7 @@ function render() {
     case 'about': renderAbout(); break;
   }
   renderRecent();
-  if (page === 'home') { renderProtocols(); ensureExitUI(); syncExitUI(); }
+  if (page === 'home') renderProtocols();
 }
 
 function renderNav() {
@@ -467,57 +467,7 @@ function renderCoreBadges() {
 }
 
 // ── protocol switcher ───────────────────────────────────────────
-const PROTO_ICON = { wg: 'i-shield', h2: 'i-split', h3: 'i-wifi', mim: 'i-server', gool: 'i-nodes', psiphon: 'i-server', auto: 'i-bolt' };
-// ── egress (出口方式) ────────────────────────────────────────────
-// The egress is a separate axis from the transport: the home screen picks
-// "默认出口" or "Psiphon". Only choosing Psiphon here — plus connecting —
-// starts psiphon. Starting the app never does.
-function ensureExitUI() {
-  if ($('#exitModeSel')) return;
-  const sel = $('#protoSelect');
-  if (!sel) return;
-  const card = sel.closest('.card');
-  if (!card) return;
-  const wrap = document.createElement('div');
-  wrap.innerHTML =
-    '<label class="field"><span>出口方式</span>' +
-    '<select id="exitModeSel">' +
-    '<option value="default">默认出口</option>' +
-    '<option value="psiphon">Psiphon</option>' +
-    '</select></label>' +
-    '<div class="kv-list wide" id="exitInfo"></div>';
-  card.appendChild(wrap);
-  $('#exitModeSel').onchange = async () => {
-    const v = $('#exitModeSel').value;
-    await api('/api/settings/exit', { exit: v });
-    S.settings = S.settings || {};
-    S.settings.exit_mode = v;
-    if (v === 'psiphon') {
-      S.settings.psiphon = S.settings.psiphon || {};
-      S.settings.psiphon.enabled = true;
-    }
-    toast(v === 'psiphon' ? '出口已切换为 Psiphon' : '出口已切换为默认', 'ok');
-    syncExitUI();
-  };
-}
-
-function syncExitUI() {
-  const es = $('#exitModeSel');
-  if (!es) return;
-  const s = S.settings || {};
-  const exit = s.exit_mode || 'default';
-  es.value = exit;
-  const proto = ((S.protocols || []).find((p) => p.key === S.activeProtocol) || {}).label || '—';
-  const p = s.psiphon || {};
-  const box = $('#exitInfo');
-  if (!box) return;
-  box.innerHTML =
-    `<div class="kv"><span>协议</span><b>${proto}</b></div>` +
-    (exit === 'psiphon'
-      ? `<div class="kv"><span>出口</span><b>Psiphon · ${p.region || '自动'}</b></div>`
-      : '<div class="kv"><span>出口</span><b>默认出口</b></div>');
-}
-
+const PROTO_ICON = { wg: 'i-shield', h2: 'i-split', h3: 'i-wifi', mim: 'i-server', gool: 'i-nodes', auto: 'i-bolt' };
 function renderProtocols() {
   const sel = $('#protoSelect');
   const list = S.protocols;
@@ -527,6 +477,20 @@ function renderProtocols() {
     sel.onchange = () => switchProtocol(sel.value);
   }
   sel.value = S.activeProtocol;
+
+  // Show a measured caveat where the transport is picked: a protocol that was
+  // measured failing is flagged instead of looking silently broken.
+  const curNote = (list.find((p) => p.key === S.activeProtocol) || {}).note;
+  let noteEl = $('#protoNote');
+  if (!noteEl) {
+    noteEl = document.createElement('p');
+    noteEl.id = 'protoNote';
+    noteEl.className = 'hint';
+    noteEl.style.color = 'var(--warn, #d08700)';
+    sel.parentNode.appendChild(noteEl);
+  }
+  noteEl.hidden = !curNote;
+  noteEl.textContent = curNote || '';
 
   const grid = $('#protoGrid');
   if (!grid.dataset.ready) {
@@ -794,107 +758,6 @@ const SCHEMA = [
   },
 ];
 
-// ── Psiphon ─────────────────────────────────────────────────────
-// Psiphon ships inside the core (2.1.0+): the client keeps no server list,
-// credentials or keys. The country is a *request* — psiphon picks an egress
-// server from what it currently has, so requested and actual may differ. Both
-// are shown; nothing here reconnects on a mismatch.
-let PSIPHON_REGIONS = [];
-
-function psiphonCard() {
-  const card = el('div', 'card');
-  card.id = 'psiphonCard';
-  card.innerHTML = `
-    <div class="card-head"><span class="title">${icon('i-server', 'mini accent')}Psiphon 设置</span></div>
-    <div class="set-grid">
-      <label class="field"><span>启用 Psiphon</span><input type="checkbox" id="psEnabled"></label>
-      <label class="field"><span>期望出口国家</span><select id="psRegion"></select></label>
-      <label class="field"><span>Psiphon 模式</span><select id="psMode">
-        <option value="cdn">CDN（前置）</option>
-        <option value="direct">Direct（直连）</option>
-        <option value="">自动</option>
-      </select></label>
-    </div>
-    <div class="kv-list wide" id="psExit"></div>
-    <p class="hint">国家为请求值：Psiphon 从当前可用服务器中选择出口，实际出口可能不同。不会因不一致而自动重连。</p>`;
-  return card;
-}
-
-async function loadPsiphonRegions() {
-  const sel = $('#psRegion');
-  if (!sel) return;
-  const r = await api('/api/psiphon/regions');
-  PSIPHON_REGIONS = (r && r.regions) || [{ code: '', name: '自动', flag: '🌐' }];
-  renderRegionOptions();
-}
-
-// Psiphon's own egress list is authoritative; the built-in list is only a
-// convenience. A country psiphon cannot currently serve gets marked rather
-// than promised.
-function psiphonAvailable() {
-  return (S.vpn && S.vpn.psiphonRegions) || [];
-}
-
-function renderRegionOptions() {
-  const sel = $('#psRegion');
-  if (!sel) return;
-  const avail = psiphonAvailable();
-  sel.innerHTML = PSIPHON_REGIONS.map((x) => {
-    const ok = avail.length === 0 || x.code === '' || avail.indexOf(x.code) >= 0;
-    return `<option value="${x.code}">${x.flag} ${x.name}${ok ? '' : '（当前不可用）'}</option>`;
-  }).join('');
-}
-
-function psRegionMeta(code) {
-  const r = PSIPHON_REGIONS.find((x) => x.code === code);
-  return r || { name: code || '自动', flag: '🌐' };
-}
-
-function syncPsiphonUI() {
-  const p = (S.settings && S.settings.psiphon) || {};
-  const en = $('#psEnabled'), rg = $('#psRegion'), md = $('#psMode');
-  if (en) en.checked = !!p.enabled;
-  if (rg) rg.value = p.region || '';
-  if (md) md.value = p.mode || 'cdn';
-
-  const box = $('#psExit');
-  if (!box) return;
-  const want = psRegionMeta(p.region || '');
-  const v = S.vpn || {};
-  const actual = v.exitIP
-    ? `${v.exitFlag || '🌐'} ${v.exitCountry || '—'} · ${v.exitIP}`
-    : '未连接';
-  // Requested vs actual is shown as plain fact. Nothing reconnects when they
-  // differ — psiphon picks a server from what it has, and the user decides.
-  const avail = psiphonAvailable();
-  const unavail = p.region && avail.length > 0 && avail.indexOf(p.region) < 0;
-  box.innerHTML =
-    `<div class="kv"><span>请求出口</span><b>${want.flag} ${want.name}${unavail ? '（当前不可用）' : ''}</b></div>` +
-    `<div class="kv"><span>实际出口</span><b>${actual}</b></div>` +
-    (avail.length
-      ? `<div class="kv"><span>Core 可用区域</span><b>${avail.join(' ')}</b></div>`
-      : '');
-  renderRegionOptions();
-}
-
-async function wirePsiphon() {
-  const en = $('#psEnabled'), rg = $('#psRegion'), md = $('#psMode');
-  if (!en || en.dataset.wired === '1') return;
-  en.dataset.wired = '1';
-  await loadPsiphonRegions();
-  syncPsiphonUI();
-  const send = async () => {
-    await api('/api/settings/psiphon', { enabled: en.checked, region: rg.value, mode: md.value });
-    S.settings = S.settings || {};
-    S.settings.psiphon = { enabled: en.checked, region: rg.value, mode: md.value };
-    syncPsiphonUI();
-    toast(tx('saved'), 'ok');
-  };
-  en.onchange = send;
-  rg.onchange = send;
-  md.onchange = send;
-}
-
 let settingsLang = '';
 function renderSettingsOnce() {
   const host = $('#settingsPage');
@@ -902,8 +765,6 @@ function renderSettingsOnce() {
   settingsLang = lang;
   if (!host.dataset.started) host.dataset.started = '1';
   host.innerHTML = '';
-  host.appendChild(psiphonCard());
-  wirePsiphon();
 
   for (const g of SCHEMA) {
     const card = el('div', 'card');

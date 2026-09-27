@@ -22,23 +22,32 @@ type Protocol struct {
 	Mode  string `json:"mode"`
 	Proto string `json:"proto"`
 	UseH2 bool   `json:"useH2"`
+	// Note is an honest caveat shown next to the picker. It is only ever set
+	// for transports that were measured failing — never as a guess.
+	Note string `json:"note,omitempty"`
 }
 
 // Protocols is the switcher model (order matters: the grid renders it as-is).
 var Protocols = []Protocol{
 	{Key: "wg", Label: "WireGuard", Mode: string(config.ModeWARP), Proto: "wg"},
-	{Key: "h2", Label: "MasqueH2", Mode: string(config.ModeMasqueH2), Proto: "masque", UseH2: true},
+	// Measured with core 2.1.0 on a filtered network: the TCP/443 TLS
+	// handshake is reset (os error 10054/10060) with fragmentation on, off,
+	// and at the core's default granularity alike. Kept selectable; the UI
+	// says so instead of silently failing.
+	{Key: "h2", Label: "MasqueH2", Mode: string(config.ModeMasqueH2), Proto: "masque", UseH2: true,
+		Note: "实测（Core 2.1.0）：当前网络下 TLS 握手失败，可能无法连接"},
 	{Key: "h3", Label: "MasqueH3", Mode: string(config.ModeMasqueH3), Proto: "masque"},
 	// MIM's inner hop rides QUIC by default, and that is the first thing DPI
 	// breaks: measured on this network, every inner edge closed with QUIC code
 	// 0x128 before validation, while the H2 path brought up both hops
 	// (outer + inner) reliably. H2 is therefore the default here; --mim --h3
 	// stays reachable for networks where QUIC gets through.
-	{Key: "mim", Label: "MASQUE-in-MASQUE", Mode: string(config.ModeMasqueH3), Proto: "mim", UseH2: true},
+	// Both MIM carriers were measured failing under core 2.1.0: HTTP/3 inner
+	// hops close with QUIC code 0x128, and the HTTP/2 path dies in the TLS
+	// handshake. Kept selectable, and flagged rather than silently failing.
+	{Key: "mim", Label: "MASQUE-in-MASQUE", Mode: string(config.ModeMasqueH3), Proto: "mim", UseH2: true,
+		Note: "实测（Core 2.1.0）：HTTP/3 内层被掐断、HTTP/2 握手失败，可能无法连接"},
 	{Key: "gool", Label: "Gool", Mode: string(config.ModeGool), Proto: "gool"},
-	// Psiphon is deliberately NOT a transport: it is an egress choice made on
-	// the home screen (Settings.Exit), kept separate so that picking a
-	// protocol can never start a third-party process on its own.
 	{Key: "auto", Label: "自动最佳", Mode: string(config.ModeAuto), Proto: ""},
 }
 
@@ -107,9 +116,6 @@ type VPNInfo struct {
 	StartedAt    time.Time `json:"startedAt"`
 	DurationSec  int64     `json:"durationSec"`
 	LocalIP      string    `json:"localIP"`
-	// PsiphonRegions is what psiphon says it can leave from right now; the UI
-	// treats it as authoritative over the built-in country list.
-	PsiphonRegions []string `json:"psiphonRegions"`
 }
 
 // TrafficInfo is the throughput block (live + cumulative).
@@ -192,7 +198,6 @@ func (b *Bridge) snapshot() Snapshot {
 			StartedAt:    st.StartedAt,
 			DurationSec:  dur,
 			LocalIP:      localIPv4(),
-			PsiphonRegions: st.PsiphonRegions,
 		},
 		Traffic: TrafficInfo{
 			DownBps:     tr.DownBytesPerSec,

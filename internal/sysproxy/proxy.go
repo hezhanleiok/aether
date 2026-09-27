@@ -164,6 +164,35 @@ func Release() error {
 	return restoreLocked()
 }
 
+// TakePACOnly installs a PAC as the sole system proxy configuration: the
+// manual proxy switch stays OFF.
+//
+// The previous flow seeded a placeholder manual proxy ("127.0.0.1:1", port 1
+// — unreachable) next to the PAC. Whenever the PAC was not honoured, every
+// app that follows the manual entry instead of the PAC was pointed at that
+// dead address, which took the whole system's browsing down with it.
+// AutoConfigURL works on its own; nothing needs the placeholder.
+func TakePACOnly(pacURL string, bypass []string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	if !wasTaken {
+		s, err := readSaved()
+		if err != nil {
+			return fmt.Errorf("read internet settings: %w", err)
+		}
+		snapshot = &s
+		wasTaken = true
+	}
+	override := strings.Join(append(append([]string{}, keepLocalBypass...), bypass...), ";")
+	if err := applyLocked(0, "", override, pacURL); err != nil {
+		return err
+	}
+	ourServer = ""
+	ourAuto = pacURL
+	persistLocked()
+	return refresh()
+}
+
 func restoreLocked() error {
 	if !wasTaken || snapshot == nil {
 		return nil

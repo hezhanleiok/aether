@@ -1,8 +1,8 @@
 {
   "gui": {
-    "version": "1.1.8",
-    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.1.8/AetherVPN-1.1.8-win-x64.zip",
-    "notes": "修复 Psiphon 出口下浏览器无法上网（HTTP 代理端口未监听）"
+    "version": "1.2.0",
+    "url": "https://github.com/hezhanleiok/aether/releases/download/v1.2.0/AetherVPN-1.2.0-win-x64.zip",
+    "notes": "移除赛风(Psiphon)；内置核心重装为官方 v2.1.0 并校验 SHA256；修复系统代理被写入死地址导致全部网页打不开。WireGuard / Gool / MasqueH3 实测可用，MasqueH2 与 MIM 在当前网络下如实标注为可能不可用"
   },
   "core": {
     "version": "v2.1.0",
