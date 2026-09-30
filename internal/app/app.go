@@ -418,6 +418,13 @@ func (a *App) connectWatchdog() {
 	if timeout < 300*time.Second && vpn.IsMasqueClass(a.Settings) {
 		timeout = 300 * time.Second
 	}
+	// A chained exit adds a second hop on top of the tunnel: Psiphon only
+	// starts once the tunnel exposes its SOCKS port and may take up to its
+	// own 180s budget to establish. Without this the watchdog stops the
+	// attempt right before the chain would come up.
+	if vpn.ExitsThroughChain(a.Settings) {
+		timeout += 180 * time.Second
+	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)

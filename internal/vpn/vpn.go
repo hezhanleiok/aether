@@ -7,6 +7,8 @@ package vpn
 import (
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -276,6 +278,8 @@ func envFor(s config.Settings) map[string]string {
 		mode := map[string]string{ChainPsiphon: "chain", ChainPsiphonOnly: "only", ChainPsiphonReverse: "reverse"}[s.ExitChain]
 		set("AETHER_PSIPHON", mode)
 		set("AETHER_PSIPHON_BIND", fmt.Sprintf("127.0.0.1:%d", PsiphonSocksPort))
+		// Own the datastore path so it can be cleaned after a killed session.
+		set("AETHER_PSIPHON_DIR", PsiphonDir())
 		// Windows' system proxy speaks HTTP, not SOCKS, so ask for an HTTP
 		// CONNECT listener too and point the system at it. Reverse mode is
 		// the exception: there Psiphon is the *entry*, the exit is still the
@@ -447,6 +451,9 @@ func (m *Manager) Connect(s config.Settings) error {
 		return err
 	}
 
+	if s.ExitChain == ChainPsiphon || s.ExitChain == ChainPsiphonOnly || s.ExitChain == ChainPsiphonReverse {
+		resetStalePsiphonState()
+	}
 	env := envFor(s)
 	sess, err := m.core.Start(env, config.Dir())
 	if err != nil {
@@ -643,6 +650,15 @@ func ExitsThroughChain(s config.Settings) bool {
 	return false
 }
 
+// IsPsiphonChain reports whether a Psiphon backend is in play (any mode).
+func IsPsiphonChain(chain string) bool {
+	switch chain {
+	case ChainPsiphon, ChainPsiphonOnly, ChainPsiphonReverse:
+		return true
+	}
+	return false
+}
+
 // ChainSocksPort is the SOCKS listener of the backend that carries the final
 // egress, or 0 when the exit is the Aether hop itself.
 func ChainSocksPort(s config.Settings) int {
@@ -653,6 +669,42 @@ func ChainSocksPort(s config.Settings) int {
 		return TorSocksPort
 	}
 	return 0
+}
+
+// PsiphonDir is where Psiphon keeps its datastore. The client owns the path
+// (instead of leaving the core's "<config>-psiphon" default next to the
+// identity file) so it can also clean it up - see resetStalePsiphonState.
+func PsiphonDir() string { return filepath.Join(config.Dir(), "psiphon") }
+
+// psiphonCleanMarker is written on a clean disconnect and removed at the
+// start of the next chained connect. If a connect finds no marker, the
+// previous session did not shut down cleanly.
+func psiphonCleanMarker() string { return filepath.Join(config.Dir(), "psiphon-clean") }
+
+// resetStalePsiphonState drops a Psiphon datastore left behind by a session
+// that was killed instead of stopped.
+//
+// Why this exists: a force-killed psiphon-tunnel-core leaves its datastore
+// behind in a state where it never attempts another server - it prints its
+// egress regions and then just sits there, so every chained connect fails
+// with no error at all. Measured: after clearing the directory, WireGuard +
+// Psiphon connects in ~9s (exit ES); with the stale directory it never
+// connects on any transport.
+//
+// A clean shutdown is the common case, so the fast path is a single stat.
+func resetStalePsiphonState() {
+	marker := psiphonCleanMarker()
+	if _, err := os.Stat(marker); err == nil {
+		_ = os.Remove(marker) // consumed: the next crash must look dirty again
+		return
+	}
+	_ = os.RemoveAll(PsiphonDir())
+	logx.Infof("[vpn] clearing a stale psiphon datastore (previous session did not stop cleanly)")
+}
+
+// markPsiphonClean records that a chained session ended normally.
+func markPsiphonClean() {
+	_ = os.WriteFile(psiphonCleanMarker(), []byte("ok"), 0o644)
 }
 
 // SystemProxyPort is the HTTP listener the Windows system proxy must point at
@@ -683,6 +735,14 @@ func (m *Manager) Disconnect() {
 	if err := m.core.Stop(); err != nil {
 		logx.Warnf("[vpn] core stop: %v", err)
 	}
+	// The core reaps Psiphon with the tunnel, so the datastore it leaves
+	// behind is reusable next time (see resetStalePsiphonState).
+	if IsPsiphonChain(m.chain) {
+		markPsiphonClean()
+	}
+	m.mu.Lock()
+	m.chain = ChainNone
+	m.mu.Unlock()
 	m.mu.Lock()
 	m.st.Status = StatusDisconnected
 	m.st.ExitIP = ""
