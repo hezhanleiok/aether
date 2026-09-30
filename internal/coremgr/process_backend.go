@@ -271,6 +271,22 @@ var classifyReReconnect = regexp.MustCompile("reconnecting|retrying|rescanning")
 // during the (long) MASQUE scan + fragmented TLS handshake.
 var classifyReProgress = regexp.MustCompile("fragmenting client hello|tls established|selected MASQUE gateway|best MASQUE gateway|MASQUE transport:|\\[h2\\] connecting|outer tunnel validated|inner tunnel validated")
 
+// Psiphon stage of the chained exit. Only real failures are matched here;
+// the routine "[-] psiphon: Config migration ..." / memory-metric notices
+// are left to the generic log path.
+var classifyRePsiphonWait = regexp.MustCompile("psiphon is waiting for the tunnel")
+var classifyRePsiphonStart = regexp.MustCompile("starting psiphon through the tunnel|psiphon shape:")
+var classifyRePsiphonReady = regexp.MustCompile("psiphon is ready")
+var classifyRePsiphonRegions = regexp.MustCompile("psiphon can leave from:")
+var classifyRePsiphonExit = regexp.MustCompile("psiphon through the tunnel exit:")
+var classifyRePsiphonFail = regexp.MustCompile("psiphon did not come up|psiphon stopped before|psiphon found no usable|psiphon would not start|psiphon has no working|psiphon could not")
+
+// Routine psiphon notices that merely contain the word "failed" (a probe
+// disconnecting: "AcceptSocks: socksPeekByte() failed: EOF") or that are pure
+// bookkeeping. They used to fall through to the generic failure rule and
+// flipped a perfectly working chain to "Failed" in the UI.
+var classifyRePsiphonNoise = regexp.MustCompile(`psiphon: (SOCKS proxy accept error|Config migration|Memory metrics|.*relayHTTPRequest)`)
+
 // Aether reports fatal startup failures on stderr as either "[-] ..." or
 // "Error: Other(...)".  The latter includes bind failures (for example a
 // stale client already owning the SOCKS port) and must never be mistaken for
@@ -282,6 +298,26 @@ func classify(line string) (kind string, ok bool) {
 	switch {
 	case classifyReIdentity.MatchString(t):
 		return "identity", true
+	// Psiphon stage of the chained exit (aether -> psiphon). Checked before
+	// the generic connected/fail patterns: with a chain, "socks5 server
+	// listening" is only the Aether hop, and "[-] psiphon: ..." lines are
+	// routine notices (config migration, memory metrics) that must not flip
+	// the UI to failed.
+	case classifyRePsiphonReady.MatchString(t):
+		return "psiphon_ready", true
+	case classifyRePsiphonRegions.MatchString(t):
+		return "psiphon_regions", true
+	case classifyRePsiphonExit.MatchString(t):
+		return "psiphon_exit", true
+	case classifyRePsiphonFail.MatchString(t):
+		return "psiphon_failed", true
+	case classifyRePsiphonNoise.MatchString(t):
+		// Routine notice, not an event: keep it in the log, keep the state.
+		return "", false
+	case classifyRePsiphonStart.MatchString(t):
+		return "psiphon_starting", true
+	case classifyRePsiphonWait.MatchString(t):
+		return "psiphon_waiting", true
 	case classifyReConnected.MatchString(t):
 		return "connected", true
 	case classifyReCandidate.MatchString(t):

@@ -116,6 +116,11 @@ type VPNInfo struct {
 	StartedAt    time.Time `json:"startedAt"`
 	DurationSec  int64     `json:"durationSec"`
 	LocalIP      string    `json:"localIP"`
+
+	// Chained exit (Aether -> Psiphon).
+	Chain       string   `json:"chain"`       // "" | psiphon
+	ChainRegion string   `json:"chainRegion"` // country the chain left from
+	ExitRegions []string `json:"exitRegions"` // exits Psiphon currently offers
 }
 
 // TrafficInfo is the throughput block (live + cumulative).
@@ -161,7 +166,9 @@ func (b *Bridge) snapshot() Snapshot {
 	gwName := ProtocolLabel(s)
 
 	dur := int64(0)
-	if !st.StartedAt.IsZero() && (st.Status == vpn.StatusConnected || st.Status == vpn.StatusConnecting || st.Status == vpn.StatusReconnecting) {
+	if !st.StartedAt.IsZero() && (st.Status == vpn.StatusConnected || st.Status == vpn.StatusConnecting ||
+		st.Status == vpn.StatusReconnecting || st.Status == vpn.StatusAetherUp ||
+		st.Status == vpn.StatusStartingPsiphon || st.Status == vpn.StatusPsiphonConnecting) {
 		dur = int64(time.Since(st.StartedAt).Seconds())
 	}
 
@@ -198,6 +205,9 @@ func (b *Bridge) snapshot() Snapshot {
 			StartedAt:    st.StartedAt,
 			DurationSec:  dur,
 			LocalIP:      localIPv4(),
+			Chain:        st.Chain,
+			ChainRegion:  st.ChainRegion,
+			ExitRegions:  st.ExitRegions,
 		},
 		Traffic: TrafficInfo{
 			DownBps:     tr.DownBytesPerSec,

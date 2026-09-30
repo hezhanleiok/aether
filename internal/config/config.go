@@ -119,6 +119,15 @@ type Settings struct {
 	Keepalive      int    `json:"keepalive"`       // wg keepalive secs
 	LastNode       string `json:"last_node"`       // selected node id
 
+	// Exit chain. "" (default) = the tunnel alone is the exit; "psiphon" =
+	// Aether -> Psiphon chained exit: the core carries Psiphon inside the
+	// tunnel, so the final egress is a Psiphon server instead of the (often
+	// mainland-CN) Aether edge. Psiphon never replaces the Aether hop.
+	// Off unless the user turns it on: first run and upgrades keep plain
+	// Aether, and leaving the mode stops and reaps Psiphon again.
+	ExitChain  string `json:"exit_chain"`  // "" | psiphon
+	ExitRegion string `json:"exit_region"` // "" = automatic; else ISO-3166-1 alpha-2, e.g. JP
+
 	// UI preferences
 	Language string `json:"language"` // zh-CN (default) | en-US
 	Theme    string `json:"theme"`    // light (default) | dark
@@ -140,9 +149,9 @@ func Defaults() Settings {
 	return Settings{
 		// Auto is the safe, expected first-run choice.  Users can select a
 		// transport explicitly from the main screen before connecting.
-		Mode:           ModeAuto,
-		IPStack:        IPv4Only, // IPv4 default: most home networks lack working IPv6, and the
-					     // core picks IPv6 endpoints under Dual → verify timeouts.
+		Mode:    ModeAuto,
+		IPStack: IPv4Only, // IPv4 default: most home networks lack working IPv6, and the
+		// core picks IPv6 endpoints under Dual → verify timeouts.
 		SocksPort:      1819,
 		HTTPProxyPort:  1820,
 		IPv6Enabled:    true,

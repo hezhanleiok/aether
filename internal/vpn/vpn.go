@@ -27,6 +27,35 @@ const (
 	StatusTesting      Status = "Testing"
 	StatusUnavailable  Status = "Unavailable"
 	StatusFailed       Status = "Failed"
+
+	// Chained-exit states (Aether -> Psiphon). "Connected" is only shown
+	// when the whole chain carries traffic, so these exist to tell the
+	// stages apart instead of claiming success early:
+	//   Connecting -> AetherConnected -> StartingPsiphon -> PsiphonConnecting
+	//   -> Connected  (or TrafficTestFailed)
+	StatusAetherUp          Status = "AetherConnected"
+	StatusStartingPsiphon   Status = "StartingPsiphon"
+	StatusPsiphonConnecting Status = "PsiphonConnecting"
+	StatusTrafficFailed     Status = "TrafficTestFailed"
+
+	// Region of the chained exit, reported by the core
+	// ("psiphon through the tunnel exit: <ip>, <CC> via <colo>").
+	StatusConnectedChain Status = StatusConnected
+)
+
+// Exit stages of the chained path, in order.
+const (
+	ChainNone    = ""
+	ChainPsiphon = "psiphon"
+)
+
+// Local listeners of the chained exit. The core serves Psiphon's own SOCKS
+// here (AETHER_PSIPHON_BIND) and an HTTP CONNECT proxy on the other port,
+// which is what the Windows system proxy is pointed at in chain mode so
+// browsers really leave through Psiphon and not through the Aether hop.
+const (
+	PsiphonSocksPort = 1821
+	PsiphonHTTPPort  = 1822
 )
 
 // State is the full observable state of the manager.
@@ -42,6 +71,15 @@ type State struct {
 	Error       string      `json:"error"`
 	StartedAt   time.Time   `json:"started_at"`
 	CoreRunning bool        `json:"core_running"`
+
+	// Chain is the active exit chain ("" or "psiphon").
+	Chain string `json:"chain"`
+	// ExitRegions is what the chained exit currently offers, taken from the
+	// core's "psiphon can leave from:" notice. Never hard-coded: the list is
+	// whatever Psiphon reports, and it drives the region picker in the UI.
+	ExitRegions []string `json:"exit_regions"`
+	// ChainRegion is the country the chained exit actually left from.
+	ChainRegion string `json:"chain_region"`
 }
 
 // Manager drives one active connection through the Core Controller.
@@ -52,6 +90,27 @@ type Manager struct {
 	subMu  sync.Mutex
 	subs   []func(State)
 	stopCh chan struct{}
+	// chain is the exit chain of the running session ("" or "psiphon"); it
+	// decides whether "the tunnel is up" already means "connected" or only
+	// "the Aether hop is up".
+	chain string
+	// dropHook fires when the core exits while a session was up. Nothing
+	// watched that before, so a crashed core simply went quiet.
+	dropHook func()
+}
+
+// SetDropHook registers the callback run when the core drops a live session.
+func (m *Manager) SetDropHook(fn func()) {
+	m.mu.Lock()
+	m.dropHook = fn
+	m.mu.Unlock()
+}
+
+// Chain returns the exit chain of the running session.
+func (m *Manager) Chain() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.chain
 }
 
 // New creates a manager around a Core Controller.
@@ -203,6 +262,25 @@ func envFor(s config.Settings) map[string]string {
 	default:
 		set("AETHER_IP", "both")
 	}
+	// Chained exit (Aether -> Psiphon). The core spawns psiphon-tunnel-core
+	// itself and gives it the Aether SOCKS address as UpstreamProxyURL, so
+	// Psiphon dials its servers *through* the tunnel - that is what makes it
+	// a chain and not a second, separate connection. We only hand over the
+	// two local addresses and the region; lifecycle and reaping stay in the
+	// core, which stops Psiphon as soon as the tunnel goes away.
+	if s.ExitChain == ChainPsiphon {
+		set("AETHER_PSIPHON", "chain")
+		set("AETHER_PSIPHON_BIND", fmt.Sprintf("127.0.0.1:%d", PsiphonSocksPort))
+		// Windows' system proxy speaks HTTP, not SOCKS, so ask for an HTTP
+		// CONNECT listener on the Psiphon side too and point the system at
+		// it - otherwise browsers would still leave through the Aether hop.
+		set("AETHER_PSIPHON_HTTP", fmt.Sprintf("127.0.0.1:%d", PsiphonHTTPPort))
+		if s.ExitRegion != "" {
+			set("AETHER_PSIPHON_REGION", strings.ToUpper(s.ExitRegion))
+		}
+		logx.Infof("[vpn] chained exit: aether -> psiphon (region=%q, socks=%d, http=%d)",
+			s.ExitRegion, PsiphonSocksPort, PsiphonHTTPPort)
+	}
 	set("AETHER_SOCKS", fmt.Sprintf("127.0.0.1:%d", s.SocksPort))
 	if s.HTTPProxyPort > 0 {
 		set("AETHER_HTTP_PROXY", fmt.Sprintf("127.0.0.1:%d", s.HTTPProxyPort))
@@ -223,11 +301,11 @@ func envFor(s config.Settings) map[string]string {
 	// here it then fails every retry, while the default keeps probing. Leave the
 	// core its own choice unless the user picked one; users who want the fast
 	// sweep can still select turbo in the scan-mode setting.
-	if IsSlowMasque(s) && s.ScanMode == "" {
-		set("AETHER_SCAN", "ironclad")
-	} else {
-		set("AETHER_SCAN", string(s.ScanMode))
-	}
+	// The UI's five modes are passed straight through, except Stealth: the
+	// core calls that mode "verified" (its own help lists
+	// turbo|balanced|thorough|verified|ironclad). An empty value is not sent
+	// at all, which leaves the core on its default, balanced.
+	set("AETHER_SCAN", CoreScanValue(s.ScanMode))
 	if s.PreferredProfile != "" {
 		set("AETHER_NOIZE", s.PreferredProfile)
 	}
@@ -360,12 +438,19 @@ func (m *Manager) Connect(s config.Settings) error {
 		return err
 	}
 	m.mu.Lock()
+	m.chain = s.ExitChain
 	m.stopCh = make(chan struct{})
 	m.st.Status = StatusConnecting
 	m.st.Mode = s.Mode
 	m.st.Error = ""
 	m.st.Gateway = s.CachedGateway
 	m.st.StartedAt = time.Now()
+	m.st.Chain = s.ExitChain
+	m.st.ChainRegion = ""
+	// Regions are re-published by Psiphon on every chained connect; dropping
+	// the stale list keeps the picker from offering exits this session has
+	// not confirmed.
+	m.st.ExitRegions = nil
 	m.mu.Unlock()
 	m.publish()
 	go m.pump(sess)
@@ -396,7 +481,35 @@ func (m *Manager) pump(sess coremgr.Session) {
 			// these lines the UI log looks frozen.
 			logx.Infof("[core] %s", ev.Line)
 		case "connected":
+			// With a chained exit the Aether hop being up is only half the
+			// path: nothing leaves through Psiphon until it reports ready, so
+			// claiming "Connected" here is exactly the bug that used to show
+			// a working tunnel with dead browsers.
+			if m.Chain() == ChainPsiphon {
+				m.set(StatusAetherUp, func(st *State) { st.Error = "" })
+			} else {
+				m.set(StatusConnected, func(st *State) { st.Error = "" })
+			}
+		case "psiphon_waiting":
+			// Psiphon is up and waiting for the Aether hop to expose SOCKS.
+			if m.Chain() == ChainPsiphon {
+				m.set(StatusPsiphonConnecting, nil)
+			}
+		case "psiphon_starting":
+			m.set(StatusStartingPsiphon, nil)
+		case "psiphon_ready":
 			m.set(StatusConnected, func(st *State) { st.Error = "" })
+		case "psiphon_regions":
+			m.SetExitRegions(parseEgressRegions(ev.Line))
+		case "psiphon_exit":
+			if cc := parseChainRegion(ev.Line); cc != "" {
+				m.mu.Lock()
+				m.st.ChainRegion = cc
+				m.mu.Unlock()
+				m.publish()
+			}
+		case "psiphon_failed":
+			m.set(StatusFailed, func(st *State) { st.Error = ev.Line })
 		case "scanning":
 			if m.State().Status == StatusConnecting {
 				m.set(StatusConnecting, nil)
@@ -409,15 +522,108 @@ func (m *Manager) pump(sess coremgr.Session) {
 			// Keep a startup error visible.  Previously a fatal bind failure was
 			// immediately overwritten by "disconnected", which made the UI look
 			// connected even though no local proxy had started.
-			if m.State().Status != StatusFailed {
+			prev := m.State().Status
+			if prev != StatusFailed {
 				m.mu.Lock()
 				m.st.Status = StatusDisconnected
 				m.mu.Unlock()
 				m.publish()
 			}
+			// A session that was already carrying traffic and then lost its
+			// core is a drop, not a clean stop: hand it back so the caller can
+			// reconnect instead of sitting in "Disconnected" forever.
+			if prev == StatusConnected || prev == StatusAetherUp ||
+				prev == StatusStartingPsiphon || prev == StatusPsiphonConnecting ||
+				prev == StatusTesting {
+				m.mu.RLock()
+				hook := m.dropHook
+				m.mu.RUnlock()
+				if hook != nil {
+					go hook()
+				}
+			}
 			return
 		}
 	}
+}
+
+// parseEgressRegions reads the core's "[*] psiphon can leave from: AT AU ..."
+// notice, which carries Psiphon's own AvailableEgressRegions. The list is
+// never hard-coded here: the picker shows whatever Psiphon says it can do.
+func parseEgressRegions(line string) []string {
+	const marker = "can leave from:"
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, tok := range strings.Fields(line[i+len(marker):]) {
+		cc := strings.ToUpper(strings.Trim(tok, ",.;"))
+		if len(cc) != 2 {
+			continue
+		}
+		if cc[0] < 'A' || cc[0] > 'Z' || cc[1] < 'A' || cc[1] > 'Z' {
+			continue
+		}
+		if !seen[cc] {
+			seen[cc] = true
+			out = append(out, cc)
+		}
+	}
+	return out
+}
+
+// parseChainRegion reads
+// "[+] psiphon through the tunnel exit: 217.160.10.119, DE via FRA".
+func parseChainRegion(line string) string {
+	const marker = "exit:"
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return ""
+	}
+	parts := strings.Split(strings.TrimSpace(line[i+len(marker):]), ",")
+	if len(parts) < 2 {
+		return ""
+	}
+	fields := strings.Fields(parts[1])
+	if len(fields) == 0 {
+		return ""
+	}
+	cc := strings.ToUpper(fields[0])
+	if len(cc) != 2 || cc[0] < 'A' || cc[0] > 'Z' || cc[1] < 'A' || cc[1] > 'Z' {
+		return ""
+	}
+	return cc
+}
+
+// SetExitRegions publishes the exits the chained hop currently offers.
+func (m *Manager) SetExitRegions(regions []string) {
+	if len(regions) == 0 {
+		return
+	}
+	m.mu.Lock()
+	m.st.ExitRegions = regions
+	m.mu.Unlock()
+	m.publish()
+}
+
+// SetTrafficFailed marks a tunnel that is up but carries no traffic. A
+// process that is alive is not a working connection - this is the state for
+// "connected, but nothing actually goes through".
+func (m *Manager) SetTrafficFailed(reason string) {
+	m.set(StatusTrafficFailed, func(st *State) { st.Error = reason })
+}
+
+// CoreScanValue maps a UI scan mode onto the value the core understands. The
+// core ships turbo|balanced|thorough|verified|ironclad - Stealth is its
+// "verified" mode, so the name is translated here instead of sending a value
+// the core would silently read as balanced.
+func CoreScanValue(m config.ScanMode) string {
+	if m == config.ScanStealth {
+		return "verified"
+	}
+	return string(m)
 }
 
 // Disconnect stops the tunnel via the Core Controller and resets state.

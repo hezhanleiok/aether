@@ -21,6 +21,11 @@ const STRINGS = {
     saved: '设置已保存', rulesSaved: '规则已保存', copied: '已复制到剪贴板', cleared: '日志已清空',
     testingStarted: '开始测速全部节点', rescanning: '已清除网关缓存，重新扫描中…',
     protocolSwitched: '协议已切换', needCore: '未找到 Aether Core：请在设置页指定核心路径后重试',
+    aetherUp: 'Aether 已连接', startingPsiphon: '正在启动 Psiphon', psiphonConnecting: 'Psiphon 连接中',
+    trafficFailed: '流量验证失败',
+    hintChain: '出口链已就绪：Aether → Psiphon → 互联网',
+    exitChain: '出口方式', exitRegion: '出口地区', automatic: '自动（由 Psiphon 决定）',
+    chainAether: 'Aether（默认）', chainPsiphon: 'Aether → Psiphon',
   },
   'en-US': {
     home: 'Home', nodes: 'Nodes', split: 'Split', rules: 'Rules', settings: 'Settings', logs: 'Logs', about: 'About',
@@ -37,6 +42,11 @@ const STRINGS = {
     saved: 'Settings saved', rulesSaved: 'Rules saved', copied: 'Copied to clipboard', cleared: 'Log cleared',
     testingStarted: 'Latency sweep started', rescanning: 'Gateway cache cleared — rescanning…',
     protocolSwitched: 'Protocol switched', needCore: 'Aether Core not found — set the core path in Settings',
+    aetherUp: 'Aether connected', startingPsiphon: 'Starting Psiphon', psiphonConnecting: 'Psiphon connecting',
+    trafficFailed: 'Traffic test failed',
+    hintChain: 'Chain ready: Aether → Psiphon → internet',
+    exitChain: 'Exit', exitRegion: 'Exit region', automatic: 'Automatic (Psiphon decides)',
+    chainAether: 'Aether (default)', chainPsiphon: 'Aether → Psiphon',
   },
 };
 let lang = 'zh-CN';
@@ -353,6 +363,7 @@ function render() {
     case 'logs': renderLogs(); break;
     case 'about': renderAbout(); break;
   }
+  if (page === 'settings') syncExitRegions();
   renderRecent();
   if (page === 'home') renderProtocols();
 }
@@ -416,15 +427,28 @@ function coreClass() {
 
 function renderHome() {
   const v = S.vpn, t = S.traffic;
-  const cls = { Connected: 'is-connected', Connecting: 'is-connecting', Reconnecting: 'is-connecting', Testing: 'is-connected', Failed: 'is-failed' }[v.status] || '';
+  const cls = {
+    Connected: 'is-connected', Connecting: 'is-connecting', Reconnecting: 'is-connecting',
+    Testing: 'is-connected', Failed: 'is-failed',
+    // Chained exit stages: the tunnel alone is not "connected" yet.
+    AetherConnected: 'is-connecting', StartingPsiphon: 'is-connecting',
+    PsiphonConnecting: 'is-connecting', TrafficTestFailed: 'is-failed',
+  }[v.status] || '';
   document.body.className = cls;
 
-  const word = { Connected: tx('connected'), Connecting: tx('connecting'), Reconnecting: tx('reconnecting'), Failed: tx('failed'), Testing: tx('testing') }[v.status] || tx('disconnected');
+  const word = {
+    Connected: tx('connected'), Connecting: tx('connecting'), Reconnecting: tx('reconnecting'),
+    Failed: tx('failed'), Testing: tx('testing'),
+    AetherConnected: tx('aetherUp'), StartingPsiphon: tx('startingPsiphon'),
+    PsiphonConnecting: tx('psiphonConnecting'), TrafficTestFailed: tx('trafficFailed'),
+  }[v.status] || tx('disconnected');
   $('#heroWord').textContent = word;
   $('#heroTime').textContent = fmtDur(v.durationSec);
-  $('#heroHint').textContent = v.status === 'Connected' ? tx('hintOn')
-    : (v.status === 'Connecting' || v.status === 'Reconnecting') ? tx('hintConnecting')
-      : v.status === 'Failed' ? (v.error || tx('failed')) : tx('hintOff');
+  const inChain = v.status === 'AetherConnected' || v.status === 'StartingPsiphon' || v.status === 'PsiphonConnecting';
+  $('#heroHint').textContent = v.status === 'Connected'
+    ? (v.chain === 'psiphon' ? tx('hintChain') : tx('hintOn'))
+    : (v.status === 'Connecting' || v.status === 'Reconnecting' || inChain) ? tx('hintConnecting')
+      : (v.status === 'Failed' || v.status === 'TrafficTestFailed') ? (v.error || tx('failed')) : tx('hintOff');
 
   const connected = v.status === 'Connected';
   $('#ipLabel').textContent = connected ? tx('exitIP') : tx('localIP');
@@ -742,6 +766,22 @@ const SCHEMA = [
     ],
   },
   {
+    name: '出口链', name_en: 'Exit chain', icon: 'i-swap', rows: [
+      {
+        k: 'exit_chain', type: 'select', label: '出口方式', label_en: 'Exit',
+        options: [['', 'Aether'], ['psiphon', 'Aether → Psiphon']],
+        hint: '默认 Aether；链式模式把 Psiphon 作为最后一跳（Aether → Psiphon → 互联网），切换后需重新连接',
+        hint_en: 'Default Aether; chained mode makes Psiphon the last hop (reconnect to apply)',
+      },
+      {
+        k: 'exit_region', type: 'select', dyn: true, label: '出口地区', label_en: 'Exit region',
+        options: [['', '自动']],
+        hint: '选项来自 Psiphon 上报的可用出口地区（AvailableEgressRegions），未写死；仅在链式模式生效',
+        hint_en: 'Options come from Psiphon AvailableEgressRegions, never hard-coded; chain mode only',
+      },
+    ],
+  },
+  {
     name: '高级', name_en: 'Advanced', icon: 'i-bolt', rows: [
       { k: 'ech', type: 'switch', label: '加密 Client Hello (ECH)', label_en: 'Encrypted Client Hello (ECH)' },
       { k: 'connect_timeout', type: 'number', label: '连接超时（秒）', label_en: 'Connect timeout (s)' },
@@ -805,6 +845,7 @@ function settingRow(r) {
   } else if (r.type === 'select') {
     const s = el('select');
     s.innerHTML = r.options.map((o) => `<option value="${o[0]}">${o[1]}</option>`).join('');
+    if (r.dyn) s.dataset.dyn = '1';
     s.onchange = (e) => patch({ [r.k]: e.target.value });
     ctl.appendChild(s);
     row.dataset.kind = 'select';
@@ -820,6 +861,25 @@ function settingRow(r) {
   row.dataset.k = r.k;
   row.appendChild(ctl);
   return row;
+}
+
+// syncExitRegions rebuilds the exit-region picker from what Psiphon actually
+// offers (vpn.exitRegions, i.e. its AvailableEgressRegions notice). The list
+// is never hard-coded here, so it can never advertise an exit that does not
+// exist; "Automatic" stays first and is the default.
+function syncExitRegions() {
+  if (!S) return;
+  const sel = document.querySelector('.set-row[data-k=exit_region] select');
+  if (!sel) return;
+  const list = (S.vpn && S.vpn.exitRegions) || [];
+  const cur = S.settings.exit_region || '';
+  const sig = list.join(',') + '|' + cur + '|' + lang;
+  if (sel.dataset.sig === sig) return;
+  sel.dataset.sig = sig;
+  let html = `<option value="">${tx('automatic')}</option>`;
+  for (const cc of list) html += `<option value="${cc}">${cc}</option>`;
+  sel.innerHTML = html;
+  sel.value = (cur === '' || list.indexOf(cur) >= 0) ? cur : '';
 }
 
 function syncSettingsUI() {

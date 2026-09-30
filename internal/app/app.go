@@ -37,7 +37,6 @@ type App struct {
 	onState []func(vpn.State)
 	onNodes []func()
 	onCore  []func()
-
 }
 
 // pickBackend chooses the core driver per settings: an explicit kind wins;
@@ -133,7 +132,29 @@ func New() (*App, error) {
 		}
 	})
 
-	a.Guard = watchguard.New(watchguard.Config{}, a, nil)
+	// The health probe has to travel the tunnel, otherwise it measures the
+	// local line and reports "healthy" while the tunnel is dead. It is built
+	// per call so it always follows the current SOCKS port and the active
+	// exit chain (a chained session leaves through Psiphon's listener).
+	a.Guard = watchguard.New(watchguard.Config{}, a,
+		func(ctx context.Context, network, addr string) (net.Conn, error) {
+			port := a.Settings.SocksPort
+			if a.Settings.ExitChain == vpn.ChainPsiphon {
+				port = vpn.PsiphonSocksPort
+			}
+			d, err := proxy.SOCKS5("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), nil, proxy.Direct)
+			if err != nil {
+				return nil, err
+			}
+			cd, ok := d.(proxy.ContextDialer)
+			if !ok {
+				return nil, fmt.Errorf("socks dialer lacks DialContext")
+			}
+			return cd.DialContext(ctx, network, addr)
+		})
+	// The core exiting on its own used to end in a silent "Disconnected"
+	// with nobody picking it up; route it to the normal reconnect path.
+	a.VPN.SetDropHook(a.TunnelDown)
 	a.Traffic = NewTrafficSampler(a)
 	return a, nil
 }
@@ -266,8 +287,6 @@ func (a *App) recoverFromFailedPin(st vpn.State) {
 	}()
 }
 
-
-
 // mimH2Fallback retries MIM over HTTP/2 when the default H3 (QUIC) path fails.
 // The core supports --mim --h2; this gives MIM a second chance on networks
 // where QUIC is blocked but TCP 443 gets through.
@@ -331,13 +350,23 @@ func (a *App) Connect() error {
 	default:
 		// Every tunneled mode (auto/full_vpn/proxy/warp/gool/masque_*) takes
 		// over the system proxy so browsers route through the tunnel.
-		if s.HTTPProxyPort > 0 {
+		//
+		// With the chained exit the system must be pointed at Psiphon's HTTP
+		// listener, not the Aether hop's: the core's own HTTP proxy still
+		// leaves through the Aether edge (often a mainland-CN address), which
+		// is exactly the "connected, but the browser is dead" failure this
+		// chain exists to fix.
+		port := s.HTTPProxyPort
+		if s.ExitChain == vpn.ChainPsiphon {
+			port = vpn.PsiphonHTTPPort
+		}
+		if port > 0 {
 			if err := sysproxy.Take(sysproxy.Options{
-				Server: fmt.Sprintf("127.0.0.1:%d", s.HTTPProxyPort),
+				Server: fmt.Sprintf("127.0.0.1:%d", port),
 			}); err != nil {
 				logx.Warnf("[app] system proxy takeover failed: %v", err)
 			} else {
-				logx.Infof("[app] system proxy -> 127.0.0.1:%d", s.HTTPProxyPort)
+				logx.Infof("[app] system proxy -> 127.0.0.1:%d (chain=%q)", port, s.ExitChain)
 			}
 		}
 	}
@@ -412,7 +441,14 @@ func (a *App) Reconnect() {
 // state + the connected node row. Failures never touch the connection.
 func (a *App) RefreshExitInfo() {
 	deadline := time.Now().Add(20 * time.Second)
-	socksAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(a.Settings.SocksPort))
+	// With the chained exit the probe has to go through Psiphon's own SOCKS
+	// listener: the Aether hop's port would happily answer while the final
+	// egress is dead, which is how "connected" used to be reported.
+	socksPort := a.Settings.SocksPort
+	if a.Settings.ExitChain == vpn.ChainPsiphon {
+		socksPort = vpn.PsiphonSocksPort
+	}
+	socksAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(socksPort))
 	for time.Now().Before(deadline) {
 		c, err := net.DialTimeout("tcp", socksAddr, time.Second)
 		if err == nil {
@@ -481,6 +517,12 @@ func (a *App) RefreshExitInfo() {
 			logx.Warnf("[app] exit IP lookup failed (%v); connection stays up", ipErr)
 		} else {
 			logx.Warnf("[app] exit IP lookup failed (connection stays up)")
+		}
+		// A chained exit that answers nothing is broken even though the
+		// tunnel is up. Say so instead of leaving a green "Connected" on a
+		// dead path - that is the failure mode this chain was added for.
+		if a.Settings.ExitChain == vpn.ChainPsiphon {
+			a.VPN.SetTrafficFailed(fmt.Sprintf("出口链无流量：经 Psiphon 出口 (127.0.0.1:%d) 的 HTTP 请求失败 %v", socksPort, ipErr))
 		}
 		return
 	}

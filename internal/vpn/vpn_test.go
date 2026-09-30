@@ -95,3 +95,80 @@ func TestEnvForCustomDNS(t *testing.T) {
 		t.Errorf("dns = %q", env["AETHER_DNS"])
 	}
 }
+
+// The chained exit (Aether -> Psiphon) is only correct if the core gets the
+// right switches and Psiphon's own notices are read back correctly.
+
+func TestParseEgressRegions(t *testing.T) {
+	line := "[2026-09-30T07:43:32.975Z INFO  aether::psiphon] [*] psiphon can leave from: AT AU BE DE JP US"
+	got := parseEgressRegions(line)
+	want := []string{"AT", "AU", "BE", "DE", "JP", "US"}
+	if len(got) != len(want) {
+		t.Fatalf("regions = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("regions = %v, want %v", got, want)
+		}
+	}
+	if parseEgressRegions("nothing here") != nil {
+		t.Error("unrelated lines must yield no regions")
+	}
+}
+
+func TestParseChainRegion(t *testing.T) {
+	if got := parseChainRegion("[+] psiphon through the tunnel exit: 217.160.10.119, DE via FRA, 1100ms to cloudflare"); got != "DE" {
+		t.Errorf("region = %q, want DE", got)
+	}
+	if got := parseChainRegion("no exit marker here"); got != "" {
+		t.Errorf("region = %q, want empty", got)
+	}
+}
+
+func TestCoreScanValue(t *testing.T) {
+	// The core knows "verified"; Stealth is the UI name for it.
+	if got := CoreScanValue(config.ScanStealth); got != "verified" {
+		t.Errorf("stealth = %q, want verified", got)
+	}
+	if got := CoreScanValue(config.ScanIronclad); got != "ironclad" {
+		t.Errorf("ironclad = %q", got)
+	}
+	if got := CoreScanValue(config.ScanBalanced); got != "balanced" {
+		t.Errorf("balanced = %q", got)
+	}
+}
+
+func TestEnvForChainedExit(t *testing.T) {
+	s := config.Defaults()
+	if env := envFor(s); env["AETHER_PSIPHON"] != "" {
+		t.Fatalf("chained exit must be off by default, got %q", env["AETHER_PSIPHON"])
+	}
+
+	s.ExitChain = ChainPsiphon
+	s.ExitRegion = "jp"
+	env := envFor(s)
+	if env["AETHER_PSIPHON"] != "chain" {
+		t.Errorf("AETHER_PSIPHON = %q, want chain", env["AETHER_PSIPHON"])
+	}
+	if env["AETHER_PSIPHON_REGION"] != "JP" {
+		t.Errorf("region = %q, want JP (upper-cased)", env["AETHER_PSIPHON_REGION"])
+	}
+	// Windows proxies speak HTTP, so the chain needs an HTTP listener too -
+	// that is what the system proxy is pointed at.
+	if env["AETHER_PSIPHON_HTTP"] == "" {
+		t.Error("chained exit needs an HTTP listener for the system proxy")
+	}
+	if env["AETHER_PSIPHON_BIND"] == "" {
+		t.Error("chained exit needs the psiphon bind address")
+	}
+	// The Aether hop stays in charge: psiphon dials through its SOCKS port.
+	if env["AETHER_SOCKS"] == "" {
+		t.Error("the aether hop must still expose its own socks listener")
+	}
+
+	// Automatic = no region at all, never an empty one.
+	s.ExitRegion = ""
+	if _, ok := envFor(s)["AETHER_PSIPHON_REGION"]; ok {
+		t.Error("automatic exit must not send a region")
+	}
+}

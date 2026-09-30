@@ -23,3 +23,5 @@ Aether-HEAD/
 # The installer's embedded payload placeholder must stay in the repo
 # (release.ps1 swaps in the real bundle only at build time).
 !cmd/aethersetup/payload/bundle.zip
+# psiphon runtime state (created by the core beside the identity file)
+aether.toml-psiphon/
