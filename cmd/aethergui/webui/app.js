@@ -772,10 +772,7 @@ const SCHEMA = [
         options: [
           ['', 'Aether'],
           ['psiphon', 'Aether → Psiphon'],
-          ['psiphon_only', 'Psiphon（直连）'],
-          ['psiphon_reverse', 'Psiphon → Aether'],
           ['tor', 'Aether → Tor'],
-          ['tor_only', 'Tor（直连）'],
         ],
         hint: '默认 Aether；链式模式把 Psiphon 作为最后一跳（Aether → Psiphon → 互联网），切换后需重新连接',
         hint_en: 'Default Aether; chained mode makes Psiphon the last hop (reconnect to apply)',
