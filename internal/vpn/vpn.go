@@ -43,19 +43,25 @@ const (
 	StatusConnectedChain Status = StatusConnected
 )
 
-// Exit stages of the chained path, in order.
+// Exit backends. The core carries each of these itself; the GUI only picks
+// the switches and the local ports (see the listener consts below).
 const (
-	ChainNone    = ""
-	ChainPsiphon = "psiphon"
+	ChainNone           = ""                // Aether only (default)
+	ChainPsiphon        = "psiphon"         // Aether -> Psiphon
+	ChainPsiphonOnly    = "psiphon_only"    // Psiphon alone, no tunnel
+	ChainPsiphonReverse = "psiphon_reverse" // Psiphon -> Aether (dial the tunnel through Psiphon)
+	ChainTor            = "tor"             // Aether -> Tor
+	ChainTorOnly        = "tor_only"        // Tor alone, no tunnel
 )
 
-// Local listeners of the chained exit. The core serves Psiphon's own SOCKS
-// here (AETHER_PSIPHON_BIND) and an HTTP CONNECT proxy on the other port,
-// which is what the Windows system proxy is pointed at in chain mode so
-// browsers really leave through Psiphon and not through the Aether hop.
+// Local listeners per backend. Ports must not collide with each other or
+// with the Aether hop (1819 SOCKS / 1820 HTTP): the core's own tor default
+// bind is 1820, which is exactly why tor gets 1823/1824 here.
 const (
 	PsiphonSocksPort = 1821
 	PsiphonHTTPPort  = 1822
+	TorSocksPort     = 1823
+	TorHTTPPort      = 1824
 )
 
 // State is the full observable state of the manager.
@@ -262,24 +268,34 @@ func envFor(s config.Settings) map[string]string {
 	default:
 		set("AETHER_IP", "both")
 	}
-	// Chained exit (Aether -> Psiphon). The core spawns psiphon-tunnel-core
-	// itself and gives it the Aether SOCKS address as UpstreamProxyURL, so
-	// Psiphon dials its servers *through* the tunnel - that is what makes it
-	// a chain and not a second, separate connection. We only hand over the
-	// two local addresses and the region; lifecycle and reaping stay in the
-	// core, which stops Psiphon as soon as the tunnel goes away.
-	if s.ExitChain == ChainPsiphon {
-		set("AETHER_PSIPHON", "chain")
+	// Exit backend. The core runs each of these itself (it spawns and reaps
+	// the psiphon/tor side processes); the GUI only picks the switches and
+	// the two local listener addresses per backend.
+	switch s.ExitChain {
+	case ChainPsiphon, ChainPsiphonOnly, ChainPsiphonReverse:
+		mode := map[string]string{ChainPsiphon: "chain", ChainPsiphonOnly: "only", ChainPsiphonReverse: "reverse"}[s.ExitChain]
+		set("AETHER_PSIPHON", mode)
 		set("AETHER_PSIPHON_BIND", fmt.Sprintf("127.0.0.1:%d", PsiphonSocksPort))
 		// Windows' system proxy speaks HTTP, not SOCKS, so ask for an HTTP
-		// CONNECT listener on the Psiphon side too and point the system at
-		// it - otherwise browsers would still leave through the Aether hop.
-		set("AETHER_PSIPHON_HTTP", fmt.Sprintf("127.0.0.1:%d", PsiphonHTTPPort))
+		// CONNECT listener too and point the system at it. Reverse mode is
+		// the exception: there Psiphon is the *entry*, the exit is still the
+		// tunnel's own 1819/1820, and an extra listener would be dead weight.
+		if mode != "reverse" {
+			set("AETHER_PSIPHON_HTTP", fmt.Sprintf("127.0.0.1:%d", PsiphonHTTPPort))
+		}
 		if s.ExitRegion != "" {
 			set("AETHER_PSIPHON_REGION", strings.ToUpper(s.ExitRegion))
 		}
-		logx.Infof("[vpn] chained exit: aether -> psiphon (region=%q, socks=%d, http=%d)",
-			s.ExitRegion, PsiphonSocksPort, PsiphonHTTPPort)
+		logx.Infof("[vpn] exit backend: psiphon mode=%s region=%q socks=%d http=%d",
+			mode, s.ExitRegion, PsiphonSocksPort, PsiphonHTTPPort)
+	case ChainTor, ChainTorOnly:
+		mode := map[string]string{ChainTor: "chain", ChainTorOnly: "only"}[s.ExitChain]
+		set("AETHER_TOR", mode)
+		// The core's tor default bind is 127.0.0.1:1820 - the same port the
+		// GUI uses for the Aether HTTP proxy. Overriding it is not optional.
+		set("AETHER_TOR_BIND", fmt.Sprintf("127.0.0.1:%d", TorSocksPort))
+		set("AETHER_TOR_HTTP", fmt.Sprintf("127.0.0.1:%d", TorHTTPPort))
+		logx.Infof("[vpn] exit backend: tor mode=%s socks=%d http=%d", mode, TorSocksPort, TorHTTPPort)
 	}
 	set("AETHER_SOCKS", fmt.Sprintf("127.0.0.1:%d", s.SocksPort))
 	if s.HTTPProxyPort > 0 {
@@ -613,6 +629,42 @@ func (m *Manager) SetExitRegions(regions []string) {
 // "connected, but nothing actually goes through".
 func (m *Manager) SetTrafficFailed(reason string) {
 	m.set(StatusTrafficFailed, func(st *State) { st.Error = reason })
+}
+
+// ExitsThroughChain reports whether the final egress is the backend's own
+// listener (as opposed to the Aether hop's 1819/1820). Reverse modes keep the
+// tunnel as the exit - the backend is only the entry - so health probes and
+// the exit-IP lookup stay on the Aether ports there.
+func ExitsThroughChain(s config.Settings) bool {
+	switch s.ExitChain {
+	case ChainPsiphon, ChainPsiphonOnly, ChainTor, ChainTorOnly:
+		return true
+	}
+	return false
+}
+
+// ChainSocksPort is the SOCKS listener of the backend that carries the final
+// egress, or 0 when the exit is the Aether hop itself.
+func ChainSocksPort(s config.Settings) int {
+	switch s.ExitChain {
+	case ChainPsiphon, ChainPsiphonOnly:
+		return PsiphonSocksPort
+	case ChainTor, ChainTorOnly:
+		return TorSocksPort
+	}
+	return 0
+}
+
+// SystemProxyPort is the HTTP listener the Windows system proxy must point at
+// for traffic to actually leave through the selected backend.
+func SystemProxyPort(s config.Settings) int {
+	switch s.ExitChain {
+	case ChainPsiphon, ChainPsiphonOnly:
+		return PsiphonHTTPPort
+	case ChainTor, ChainTorOnly:
+		return TorHTTPPort
+	}
+	return s.HTTPProxyPort
 }
 
 // CoreScanValue maps a UI scan mode onto the value the core understands. The

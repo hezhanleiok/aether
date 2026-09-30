@@ -139,8 +139,12 @@ func New() (*App, error) {
 	a.Guard = watchguard.New(watchguard.Config{}, a,
 		func(ctx context.Context, network, addr string) (net.Conn, error) {
 			port := a.Settings.SocksPort
-			if a.Settings.ExitChain == vpn.ChainPsiphon {
-				port = vpn.PsiphonSocksPort
+			// Once the session is fully up and the backend carries the final
+			// egress, health-check the whole path (backend listener), not just
+			// the Aether hop. Before that, and for reverse backends, the
+			// Aether hop is the thing to watch.
+			if a.VPN.State().Status == vpn.StatusConnected && vpn.ExitsThroughChain(a.Settings) {
+				port = vpn.ChainSocksPort(a.Settings)
 			}
 			d, err := proxy.SOCKS5("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), nil, proxy.Direct)
 			if err != nil {
@@ -251,6 +255,15 @@ func (a *App) NetworkChanged() {
 }
 
 func (a *App) TunnelDown() {
+	// The guard starts probing the moment a connect begins, but the listeners
+	// only exist after the core validates the tunnel - and with a chained exit
+	// Psiphon needs another 1-3 minutes on top. Treating probe failures from
+	// that window as a dead tunnel reconnected every attempt mid-scan, which
+	// is why chained connects never survived and plain connects kept churning.
+	if st := a.VPN.State().Status; st != vpn.StatusConnected && st != vpn.StatusTrafficFailed {
+		logx.Debugf("[app] tunnel probe failed while %s; ignored (session is still coming up)", st)
+		return
+	}
 	logx.Warnf("[app] tunnel down")
 	if a.Settings.AutoReconnect {
 		a.Reconnect()
@@ -314,6 +327,12 @@ func (a *App) mimH2Fallback(st vpn.State) {
 }
 
 func (a *App) GatewayUnhealthy() {
+	// Same gate as TunnelDown: a probe failure during Connecting is the
+	// normal "listeners are not up yet", not a broken gateway.
+	if st := a.VPN.State().Status; st != vpn.StatusConnected && st != vpn.StatusTrafficFailed {
+		logx.Debugf("[app] gateway probe failed while %s; ignored", st)
+		return
+	}
 	logx.Warnf("[app] gateway unhealthy: rescanning")
 	a.Settings.AutoScan = true
 	a.Reconnect()
@@ -356,10 +375,7 @@ func (a *App) Connect() error {
 		// leaves through the Aether edge (often a mainland-CN address), which
 		// is exactly the "connected, but the browser is dead" failure this
 		// chain exists to fix.
-		port := s.HTTPProxyPort
-		if s.ExitChain == vpn.ChainPsiphon {
-			port = vpn.PsiphonHTTPPort
-		}
+		port := vpn.SystemProxyPort(s)
 		if port > 0 {
 			if err := sysproxy.Take(sysproxy.Options{
 				Server: fmt.Sprintf("127.0.0.1:%d", port),
@@ -445,8 +461,8 @@ func (a *App) RefreshExitInfo() {
 	// listener: the Aether hop's port would happily answer while the final
 	// egress is dead, which is how "connected" used to be reported.
 	socksPort := a.Settings.SocksPort
-	if a.Settings.ExitChain == vpn.ChainPsiphon {
-		socksPort = vpn.PsiphonSocksPort
+	if vpn.ExitsThroughChain(a.Settings) {
+		socksPort = vpn.ChainSocksPort(a.Settings)
 	}
 	socksAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(socksPort))
 	for time.Now().Before(deadline) {
