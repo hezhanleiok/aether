@@ -1,10 +1,10 @@
 //go:build windows
 
-// Command aethersetup is the Windows installer for the AetherVPN client.
+// Command aethersetup is the Windows installer for the Xiaohe client.
 //
 // The release bundle (GUI executable plus its matching Aether core) is
 // embedded into this binary, so the setup is a single self-contained file:
-// it unpacks to %LOCALAPPDATA%\AetherVPN, drops a shortcut on the desktop
+// it unpacks to %LOCALAPPDATA%\Xiaohe, drops a shortcut on the desktop
 // and one in the start menu, and can start the client when it is done.
 //
 // Build it with -H=windowsgui so no console window flashes behind the wizard.
@@ -28,7 +28,7 @@ import (
 //go:embed payload/bundle.zip
 var payload embed.FS
 
-const appName = "AetherVPN"
+const appName = "Xiaohe"
 
 var (
 	mw     *walk.MainWindow
@@ -115,7 +115,7 @@ func doInstall(dir string) error {
 
 	total := len(zr.File)
 	for i, f := range zr.File {
-		// The bundle is flat: AetherVPN.exe plus core-bin/aether.exe, already
+		// The bundle is flat: Xiaohe.exe plus core-bin/aether.exe, already
 		// at the archive root, so entries are used as they are.
 		name := filepath.FromSlash(f.Name)
 		if name == "" || strings.HasSuffix(name, "/") || strings.Contains(name, "..") {

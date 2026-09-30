@@ -1,4 +1,4 @@
-/* AetherVPN — web UI controller.
+/* Xiaohe — web UI controller.
  * Talks to the local webbridge over fetch + SSE. Every control below drives a
  * real backend action: connect/disconnect, protocol switch, node pinning and
  * latency sweeps, split rules, Windows proxy take-over, core management. */

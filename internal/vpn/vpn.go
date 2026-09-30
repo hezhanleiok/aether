@@ -379,7 +379,7 @@ func ensureLocalPortAvailable(port int) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("SOCKS port %s is already in use; close the other AetherVPN/aether process or choose another SOCKS port", addr)
+		return fmt.Errorf("SOCKS port %s is already in use; close the other Xiaohe/aether process or choose another SOCKS port", addr)
 	}
 	return ln.Close()
 }

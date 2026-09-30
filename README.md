@@ -1,25 +1,37 @@
-# AetherVPN — Windows VPN Client (Go + Aether Core)
+# Xiaohe — Windows 客户端（Go + 第三方 Aether Core）
 
-> 基于 [Aether](https://github.com/CluvexStudio/Aether) 核心构建的 Windows 图形客户端。
+> Xiaohe 是独立开发的 Windows 图形客户端，使用第三方 **Aether Core**
+> （[CluvexStudio/Aether](https://github.com/CluvexStudio/Aether)）作为网络核心组件。
 > 作者：**xiaohe**
 
-Go 原生 GUI 驱动 Aether Core 的 Windows VPN 客户端。核心网络功能（WARP / WireGuard /
+**Xiaohe 不是 CluvexStudio 官方产品**，与 CluvexStudio 没有官方从属、背书或授权关系。
+Xiaohe 与 Aether Core 的关系是：
+
+```text
+Xiaohe                    独立开发的 Windows 客户端（本项目）
+  └── uses               调用，不修改、不重新编译
+      └── Aether Core     第三方开源核心
+            ├── upstream: CluvexStudio
+            └── license:  AGPL-3.0
+```
+
+Go 原生 GUI 驱动 Aether Core 的 Windows 客户端。核心网络功能（WARP / WireGuard /
 MASQUE / WARP-in-WARP / Gateway 发现与验证）全部由独立的 Aether Core 提供，GUI 不重复实现。
 
 ## 下载
 
 | 文件 | 说明 |
 | --- | --- |
-| `AetherVPN-<版本>-win-x64.zip` | 便携版：解压后双击 `AetherVPN.exe` 即可运行 |
-| `AetherVPN-Setup-<版本>.exe` | 安装版：安装完成后自动创建桌面快捷方式 |
+| `Xiaohe-<版本>-win-x64.zip` | 便携版：解压后双击 `Xiaohe.exe` 即可运行 |
+| `Xiaohe-Setup-<版本>.exe` | 安装版：安装完成后自动创建桌面快捷方式 |
 
-两个版本均自带配套的 Aether 核心，无需另行下载。最新版本见
+两个版本均自带配套的 Aether Core，无需另行下载。最新版本见
 [Releases](https://github.com/hezhanleiok/aether/releases)。
 
 ## 架构
 
 ```
-AetherVPN.exe (Go 外壳)
+Xiaohe.exe (Go 外壳)
    │
    ├─ 本机窗口 (WebView2 嵌入 Win32 窗口) + 托盘     ← cmd/aethergui/ui_windows.go
    │     └─ 降级：Edge/Chrome --app 无地址栏窗口（无 WebView2 运行时时）
@@ -35,7 +47,7 @@ AetherVPN.exe (Go 外壳)
    │            ├─ ProcessBackend       独立 aether.exe 子进程
    │            └─ LibraryBackend       libaether.dll C API
    │
-   Aether Core (独立运行)  WARP · WireGuard · MASQUE H2/H3 · Gool · M-in-M
+   Aether Core (第三方，独立运行)  WARP · WireGuard · MASQUE H2/H3 · Gool · M-in-M
         └─ 127.0.0.1:1819 SOCKS5 + 127.0.0.1:1820 HTTP CONNECT
 ```
 
@@ -79,10 +91,13 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ### 产物结构
 
 ```
-AetherVPN-<版本>\
-  AetherVPN.exe          ← GUI 程序（双击即用，无需安装）
+Xiaohe-<版本>\
+  Xiaohe.exe             ← GUI 程序（双击即用，无需安装）
   core-bin\
-    aether.exe           ← Aether Core，独立进程
+    aether.exe           ← Aether Core（第三方），独立进程
+  THIRD-PARTY-NOTICES.md ← 第三方组件清单与许可证
+  THIRD-PARTY-LICENSES\  ← 第三方许可证正文
+  LICENSE.txt            ← 本软件授权与第三方声明
   README.txt
 ```
 
@@ -104,11 +119,11 @@ go run ./cmd/aethere2e      # 真实隧道端到端: warp=on + 出口 IP
 UI 调试（只起服务，可用浏览器打开同一套界面）：
 
 ```powershell
-.\bin\aethergui.exe -ui=none -port=18211 -print-url
+.\bin\Xiaohe.exe -ui=none -port=18211 -print-url
 ```
 
 | `-ui` | 行为 |
-|---|---|
+| --- | --- |
 | `auto`（默认） | WebView2 本机窗口，失败自动降级到浏览器 `--app` 窗口 |
 | `window` | 只用 WebView2 本机窗口 |
 | `browser` | 只用 Edge/Chrome `--app` 窗口 |
@@ -119,7 +134,7 @@ UI 调试（只起服务，可用浏览器打开同一套界面）：
 ## 模块
 
 | 包 | 职责 |
-|---|---|
+| --- | --- |
 | cmd/aethergui | 本机窗口（WebView2 + 托盘）与嵌入式前端资源 |
 | internal/webbridge | **UI 通道**: 环回 HTTP + SSE，状态快照/流量序列/动作 API |
 | internal/coremgr | **Core Controller**: Backend 接口 + 进程/库后端 + 生命周期与健康 |
@@ -131,7 +146,6 @@ UI 调试（只起服务，可用浏览器打开同一套界面）：
 | internal/watchguard | 网络监测 / 隧道探测 / 故障切换 |
 | internal/config | 设置持久化（含 CorePath/CoreKind/CoreExtraArgs） |
 | internal/app | 装配层 |
-| cmd/aethergui | walk UI |
 
 ## Core 升级路径
 
@@ -143,18 +157,66 @@ Core 版本变化只需：替换 core-bin\aether.exe（或 libaether.dll + 设�
 - **本客户端（GUI）**
   - 由 **xiaohe** 开发并发布
   - 采用**试用授权**：自首次启动起可免费试用 **7 天**
-  - 授权状态与到期时间由本仓库的 `version.json` 远程控制，到期后软件会提示续期
+  - 授权状态与到期时间由本仓库的 `version.json` 远程控制（当前到期日 **2026-10-30**），
+    到期后软件会提示续期
   - 续期请联系作者（作者主页见仓库首页）
-- **Aether 核心**
-  - 本项目内置并随包分发 [Aether](https://github.com/CluvexStudio/Aether) 核心二进制文件
-  - 该核心的版权与许可证归原作者 **CluvexStudio** 所有，本项目仅作调用与随包分发
-  - 核心更新始终与 GUI 版本配套发布，不会单独变更
-- 请遵守所在地法律法规，以及所访问网络服务的使用条款
+
+## 第三方组件与许可证
+
+Xiaohe 使用并随包分发第三方组件，这些组件的许可证仍然适用于它们自身，
+不会因被 Xiaohe 使用而改变。
+
+### Aether Core
+
+- Xiaohe 使用由 **CluvexStudio** 开发的 **Aether Core**
+- Aether Core 是**独立的第三方组件**，以独立进程 `core-bin\aether.exe` 运行
+- Aether Core 的源代码采用 **GNU Affero General Public License v3.0（AGPL-3.0）**
+- Aether Core 的版权归其原作者/维护者所有
+- **Xiaohe 并不声称拥有 Aether Core 的版权**，也未修改或重新编译其源代码；
+  随包分发的是上游发布的官方二进制
+- **Xiaohe 不是 CluvexStudio 官方产品**
+- **Xiaohe 与 CluvexStudio 没有官方从属、背书或授权关系**
+
+官方项目：https://github.com/CluvexStudio/Aether
+上游许可证：https://github.com/CluvexStudio/Aether/blob/main/LICENSE
+上游商标政策：https://github.com/CluvexStudio/Aether/blob/main/TRADEMARK.md
+
+### 商标与品牌声明
+
+Aether name, logo, branding, and related project identity belong to
+CluvexStudio and the Aether project and are subject to the upstream
+Aether trademark policy.
+
+Xiaohe uses the Aether Core as a third-party component and does not
+claim ownership of the Aether name, logo, or branding.
+
+Xiaohe is independently branded and is not represented as an official
+Aether product.
+
+### 其他第三方组件
+
+Xiaohe.exe 静态链接了若干第三方 Go 模块（walk / win / go-webview2 /
+go-winloader / x-net / x-sys / govaluate），各自的 BSD-3-Clause、MIT、ISC
+许可证保持不变。完整清单见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
+## License
+
+Xiaohe 自身的源代码**采用试用授权**（非开源许可证）：由 xiaohe 开发并发布，
+自首次启动起可免费试用 7 天，授权状态与到期时间由本仓库 `version.json` 远程控制。
+详见上文「授权与许可」。
+
+Xiaohe 同时分发并使用第三方组件，这些组件的许可证仍然适用于它们自身。
+其中 Aether Core 采用 **AGPL-3.0**，该许可证适用于 Aether Core 这一组件，
+**不适用于 Xiaohe 自身的源代码**。
+
+See:
+
+- [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)
+- [THIRD-PARTY-LICENSES/AETHER-AGPL-3.0.txt](THIRD-PARTY-LICENSES/AETHER-AGPL-3.0.txt)
 
 ## 致谢
 
 - **特别感谢 [Aether](https://github.com/CluvexStudio/Aether)（CluvexStudio）** —
-  本客户端的全部网络能力（WARP / WireGuard / MASQUE / MASQUE-in-MASQUE / Gool /
-  网关发现与验证）都来自这个项目。没有 Aether，就没有 AetherVPN。
+  Xiaohe 的全部网络能力（WARP / WireGuard / MASQUE / MASQUE-in-MASQUE / Gool /
+  网关发现与验证）都来自这个第三方核心。没有 Aether Core，就没有 Xiaohe 的网络能力。
 - 感谢 [Aethery](https://github.com/ZethRise/Aethery) 在移动端上的探索与参考。
-

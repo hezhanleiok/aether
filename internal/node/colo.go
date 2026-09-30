@@ -61,7 +61,7 @@ func ProbeColo(ctx context.Context, addr string, timeout time.Duration) (colo, l
 	}
 	req := "GET /cdn-cgi/trace HTTP/1.1\r\n" +
 		"Host: cloudflare.com\r\n" +
-		"User-Agent: AetherVPN\r\n" +
+		"User-Agent: Xiaohe\r\n" +
 		"Accept: text/plain\r\n" +
 		"Connection: close\r\n\r\n"
 	if _, err := io.WriteString(tlsConn, req); err != nil {
@@ -128,7 +128,7 @@ func SpeedTest(ctx context.Context, addr string, timeout time.Duration) (int64, 
 	// above caps the transfer, and partial transfers still yield a honest bps.
 	req := "GET /__down?bytes=8000000 HTTP/1.1\r\n" +
 		"Host: speed.cloudflare.com\r\n" +
-		"User-Agent: AetherVPN\r\n" +
+		"User-Agent: Xiaohe\r\n" +
 		"Accept: */*\r\n" +
 		"Connection: close\r\n\r\n"
 	start := time.Now()

@@ -1,6 +1,6 @@
 //go:build ignore
 
-// Command mkicon draws the AetherVPN application icon and writes both a PNG
+// Command mkicon draws the Xiaohe application icon and writes both a PNG
 // and a Windows .ico (PNG-compressed entry, supported since Vista).
 //
 // Run with:  go run tools/mkicon.go

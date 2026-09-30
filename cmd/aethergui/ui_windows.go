@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	appTitle = "AetherVPN"
+	appTitle = "Xiaohe"
 	prefW    = 1280 // preferred size; shrunk to fit the current desktop
 	prefH    = 860
 	minW     = 960

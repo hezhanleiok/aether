@@ -23,9 +23,9 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $root
 
 $build = Join-Path $root "build"
-$stage = Join-Path $build "AetherVPN-$Version-win-x64"
-$zip = Join-Path $build "AetherVPN-$Version-win-x64.zip"
-$setup = Join-Path $build "AetherVPN-Setup-$Version.exe"
+$stage = Join-Path $build "Xiaohe-$Version-win-x64"
+$zip = Join-Path $build "Xiaohe-$Version-win-x64.zip"
+$setup = Join-Path $build "Xiaohe-Setup-$Version.exe"
 $payload = Join-Path $root "cmd\aethersetup\payload\bundle.zip"
 $payloadBak = Join-Path $env:TEMP "bundle-placeholder.zip"
 
@@ -41,33 +41,40 @@ try {
 
     # ---------------------------------------------------------------- Build
     Write-Host "[1/6] Build" -ForegroundColor Cyan
-    go build -ldflags="-H=windowsgui" -o (Join-Path $build "AetherVPN.exe") ./cmd/aethergui
+    go build -ldflags="-H=windowsgui" -o (Join-Path $build "Xiaohe.exe") ./cmd/aethergui
     if ($LASTEXITCODE -ne 0) { throw "GUI build failed" }
-    Write-Host "      GUI      -> AetherVPN.exe"
+    Write-Host "      GUI      -> Xiaohe.exe"
 
     # ---------------------------------------------------------------- Stage
     Write-Host "[2/6] Stage" -ForegroundColor Cyan
     New-Item -ItemType Directory -Force -Path (Join-Path $stage "core-bin") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $stage "docs") | Out-Null
 
-    Copy-Item (Join-Path $build "AetherVPN.exe") (Join-Path $stage "AetherVPN.exe") -Force
+    Copy-Item (Join-Path $build "Xiaohe.exe") (Join-Path $stage "Xiaohe.exe") -Force
     Copy-Item (Join-Path $root "core-bin\aether.exe") (Join-Path $stage "core-bin\aether.exe") -Force
+    # The core ships with its own license: keep the notices at the archive root
+    # where a user can actually find them, instead of buried inside the GUI.
+    Copy-Item (Join-Path $root "THIRD-PARTY-NOTICES.md") (Join-Path $stage "THIRD-PARTY-NOTICES.md") -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $stage "THIRD-PARTY-LICENSES") | Out-Null
+    Copy-Item (Join-Path $root "THIRD-PARTY-LICENSES\*") (Join-Path $stage "THIRD-PARTY-LICENSES") -Recurse -Force
 
     # Both binaries are pure Go (CGO_ENABLED=0, no `import "C"` anywhere), so
     # they are statically linked and need no third-party DLLs or runtime files
     # beside them. Nothing is added here just to make the package look bigger.
 
     Write-Utf8 (Join-Path $stage "README.txt") @"
-AetherVPN $Version
+Xiaohe $Version
 
-  双击 AetherVPN.exe 即可启动，无需安装。
+  双击 Xiaohe.exe 即可启动，无需安装。
 
 目录说明
-  AetherVPN.exe        图形界面（Go 编写，静态链接，无需额外运行库）
-  core-bin\aether.exe  Aether 核心，独立进程，由界面调用
-  docs\                项目文档
-  LICENSE.txt          许可与第三方声明
-  CHANGELOG.txt        版本变更记录
+  Xiaohe.exe            图形界面（Go 编写，静态链接，无需额外运行库）
+  core-bin\aether.exe   Aether Core，第三方独立进程，由界面调用
+  docs\                 项目文档
+  LICENSE.txt           本软件授权与第三方声明
+  THIRD-PARTY-NOTICES.md      第三方组件清单与许可证
+  THIRD-PARTY-LICENSES\       第三方许可证正文
+  CHANGELOG.txt         版本变更记录
 
 说明
   - 界面与核心分离：核心是可独立替换的进程，但更新时二者随同一个更新包
@@ -78,7 +85,7 @@ AetherVPN $Version
 "@
 
     Write-Utf8 (Join-Path $stage "LICENSE.txt") @"
-AetherVPN
+Xiaohe
 Copyright (c) xiaohe
 
 本客户端（GUI）由 xiaohe 开发并发布，采用试用授权：自首次启动起可免费
@@ -86,10 +93,17 @@ Copyright (c) xiaohe
 version.json 远程控制。
 
 第三方组件
-  - Aether（CluvexStudio）：本软件内置并随包分发其官方核心二进制文件
-    aether.exe。该核心的版权与许可证归原作者 CluvexStudio 所有，本项目
-    仅作调用与随包分发，未修改其核心代码。
-  - 其余 Go 语言依赖见仓库 go.mod 与 vendor\ 目录。
+  - Aether Core（CluvexStudio）：本软件内置并随包分发其官方核心二进制文件
+    aether.exe。Aether Core 是独立的第三方组件，采用 GNU Affero General
+    Public License v3.0（AGPL-3.0）；其版权与许可证归原作者 CluvexStudio
+    所有。本项目仅作调用与随包分发，未修改其核心代码，也不声称拥有其版权。
+    官方项目：https://github.com/CluvexStudio/Aether
+    Xiaohe 不是 CluvexStudio 官方产品，与 CluvexStudio 没有官方从属、
+    背书或授权关系。
+  - 其余 Go 语言依赖（已静态链接进 Xiaohe.exe）见仓库 vendor\ 目录与
+    本包内的 THIRD-PARTY-NOTICES.md。
+
+第三方许可证正文见本包 THIRD-PARTY-LICENSES\ 目录。
 
 本软件按「原样」提供，作者不对使用后果作任何担保。请遵守所在地法律法规
 以及所访问网络服务的使用条款。
@@ -102,6 +116,8 @@ $Version
   - 内置核心重装为官方 v2.1.0（SHA256 与官方一致）
   - MasqueH2 与 MIM 在当前网络下无法连接，界面如实标注
   - 修复启动闪现的黑框（改为 GUI 子系统构建）
+  - 产品名称统一为 Xiaohe（旧产品名停止使用），发布包附带第三方许可证与声明
+  - 授权到期时间延长至 2026-10-30
 
 1.1.5
   - 修复 MASQUE 连不上（连接超时预算不足，跑不满网关搜索即被判失败）
@@ -138,11 +154,13 @@ $Version
     # ------------------------------------------------------------- Validate
     Write-Host "[3/6] Validate" -ForegroundColor Cyan
     $required = @(
-        (Join-Path $stage "AetherVPN.exe"),
+        (Join-Path $stage "Xiaohe.exe"),
         (Join-Path $stage "core-bin\aether.exe"),
         (Join-Path $stage "README.txt"),
         (Join-Path $stage "LICENSE.txt"),
-        (Join-Path $stage "CHANGELOG.txt")
+        (Join-Path $stage "CHANGELOG.txt"),
+        (Join-Path $stage "THIRD-PARTY-NOTICES.md"),
+        (Join-Path $stage "THIRD-PARTY-LICENSES\AETHER-AGPL-3.0.txt")
     )
     foreach ($f in $required) {
         if (-not (Test-Path $f)) { throw "missing staged file: $f" }
@@ -212,7 +230,7 @@ $Version
     $notes = $notes.Replace("{version}", $Version)
     $notes += "`n`n### SHA256`n`n``````n" + ($sums -join "`n") + "`n``````n"
 
-    $body = @{ tag_name = "v$Version"; name = "AetherVPN v$Version"; body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json
+    $body = @{ tag_name = "v$Version"; name = "Xiaohe v$Version"; body = $notes; draft = $false; prerelease = $false } | ConvertTo-Json
 
     # Splatting so the proxy key is only present when one is configured -
     # passing -Proxy $null is an error.

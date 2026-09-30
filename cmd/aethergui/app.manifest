@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="AetherGUI.AetherVPN" type="win32"/>
-  <description>AetherVPN — Windows VPN Client (Aether Core)</description>
+  <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Xiaohe.Client" type="win32"/>
+  <description>Xiaohe — Windows VPN Client (uses the third-party Aether Core)</description>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
