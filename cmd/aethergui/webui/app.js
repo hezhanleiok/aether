@@ -783,6 +783,7 @@ const SCHEMA = [
         hint: '选项来自 Psiphon 上报的可用出口地区（AvailableEgressRegions），未写死；仅在链式模式生效',
         hint_en: 'Options come from Psiphon AvailableEgressRegions, never hard-coded; chain mode only',
       },
+
     ],
   },
   {

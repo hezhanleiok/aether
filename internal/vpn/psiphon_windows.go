@@ -5,6 +5,7 @@ package vpn
 import (
 	"os/exec"
 	"strings"
+	"syscall"
 
 	"github.com/aethergui/aethergui/internal/logx"
 )
@@ -29,7 +30,11 @@ func killOrphanPsiphon() {
 	if err != nil {
 		return
 	}
-	out, err := exec.Command(taskkill, "/F", "/T", "/IM", "psiphon-tunnel-core.exe").CombinedOutput()
+	cmd := exec.Command(taskkill, "/F", "/T", "/IM", "psiphon-tunnel-core.exe")
+	// Without this the helper flashes a console window on every connect,
+	// disconnect and protocol switch - taskkill is a console program.
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// taskkill exits non-zero when there is nothing to kill (128 on a
 		// Chinese locale, whose "no such process" message is not the English

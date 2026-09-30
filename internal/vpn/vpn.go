@@ -301,6 +301,15 @@ func envFor(s config.Settings) map[string]string {
 		set("AETHER_TOR_HTTP", fmt.Sprintf("127.0.0.1:%d", TorHTTPPort))
 		logx.Infof("[vpn] exit backend: tor mode=%s socks=%d http=%d", mode, TorSocksPort, TorHTTPPort)
 	}
+	// Exit-country policy (the core's --exit-loc): "!CN" refuses a tunnel
+	// whose egress geo-resolves to CN and re-selects; "US,JP" allows only
+	// those countries. This is the core-native way to get "自动选最快的非 CN
+	// 网关": the scan still picks the fastest handshake, and anything whose
+	// exit lands in a denied country is re-checked (default every 60s) and
+	// re-scanned until the exit is accepted.
+	if loc := sanitizeExitLoc(s.ExitLoc); loc != "" {
+		set("AETHER_EXIT_LOC", loc)
+	}
 	set("AETHER_SOCKS", fmt.Sprintf("127.0.0.1:%d", s.SocksPort))
 	if s.HTTPProxyPort > 0 {
 		set("AETHER_HTTP_PROXY", fmt.Sprintf("127.0.0.1:%d", s.HTTPProxyPort))
@@ -695,20 +704,36 @@ func ChainSocksPort(s config.Settings) int {
 // identity file) so it can also clean it up - see resetStalePsiphonState.
 func PsiphonDir() string { return filepath.Join(config.Dir(), "psiphon") }
 
-// resetPsiphonState clears the Psiphon datastore so every chained session
-// starts from a known-good state.
+// resetPsiphonState clears only the lock files of the Psiphon datastore.
 //
-// Psiphon is not safe to reuse across sessions here: a leftover process keeps
-// the BoltDB lock (openDataStore timeout) and a killed one leaves the store
-// in a state where it stops trying servers. Wiping costs a couple of seconds
-// of re-fetching the server list and is worth it - measured: ~9s from tunnel
-// up to "psiphon is ready" on a cold store, and never a silent hang.
+// The datastore itself (downloaded server list, tactics) must SURVIVE: with a
+// cold store Psiphon has to fetch its remote server list from S3 through the
+// just-established tunnel, and on a slow first hop that fetch times out
+// ("failed to fetch common remote server list: context deadline exceeded") -
+// the chained connect then dies before it ever carried traffic. The stale
+// lock, on the other hand, must go: a killed psiphon-tunnel-core leaves it
+// behind and the next one times out opening the database.
+//
+// The orphan process is reaped before this runs (killOrphanPsiphon), so the
+// lock files are guaranteed to be stale.
 func resetPsiphonState() {
-	if err := os.RemoveAll(PsiphonDir()); err != nil {
-		logx.Warnf("[vpn] clearing the psiphon datastore: %v", err)
-		return
+	dir := PsiphonDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return // no datastore yet - nothing stale to clean
 	}
-	logx.Debugf("[vpn] psiphon datastore cleared for a fresh chained session")
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".lock") {
+			continue
+		}
+		if os.Remove(filepath.Join(dir, e.Name())) == nil {
+			removed++
+		}
+	}
+	if removed > 0 {
+		logx.Debugf("[vpn] cleared %d stale psiphon lock file(s); datastore kept", removed)
+	}
 }
 
 // SystemProxyPort is the HTTP listener the Windows system proxy must point at
@@ -721,6 +746,33 @@ func SystemProxyPort(s config.Settings) int {
 		return TorHTTPPort
 	}
 	return s.HTTPProxyPort
+}
+
+// sanitizeExitLoc validates a user-provided exit-country policy before it is
+// handed to the core. Accepted shapes: "!CN" / "!CN,HK" (deny list) and
+// "US,JP" (allow list), case-insensitive. Anything malformed is dropped so a
+// typo can never send the core into a re-select loop.
+func sanitizeExitLoc(raw string) string {
+	spec := strings.ToUpper(strings.TrimSpace(raw))
+	if spec == "" || spec == "ANY" || spec == "OFF" {
+		return ""
+	}
+	negated := strings.HasPrefix(spec, "!")
+	codes := []string{}
+	for _, c := range strings.Split(strings.TrimPrefix(spec, "!"), ",") {
+		c = strings.TrimSpace(c)
+		if len(c) == 2 && c[0] >= 'A' && c[0] <= 'Z' && c[1] >= 'A' && c[1] <= 'Z' {
+			codes = append(codes, c)
+		}
+	}
+	if len(codes) == 0 {
+		return ""
+	}
+	joined := strings.Join(codes, ",")
+	if negated {
+		return "!" + joined
+	}
+	return joined
 }
 
 // CoreScanValue maps a UI scan mode onto the value the core understands. The

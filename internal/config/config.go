@@ -127,6 +127,12 @@ type Settings struct {
 	// Aether, and leaving the mode stops and reaps Psiphon again.
 	ExitChain  string `json:"exit_chain"`  // "" | psiphon
 	ExitRegion string `json:"exit_region"` // "" = automatic; else ISO-3166-1 alpha-2, e.g. JP
+	// ExitLoc is the core's exit-country policy (AETHER_EXIT_LOC): "!" prefix
+	// denies (e.g. "!CN" = refuse tunnels exiting to mainland China and
+	// re-select), a bare list allows only those (e.g. "US,JP"). Empty =
+	// automatic, no restriction. Opt-in: on networks where every WARP egress
+	// geo-resolves to CN, a deny policy makes the core re-hop forever.
+	ExitLoc string `json:"exit_loc"`
 
 	// UI preferences
 	Language string `json:"language"` // zh-CN (default) | en-US
