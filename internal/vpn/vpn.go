@@ -450,9 +450,28 @@ func (m *Manager) Connect(s config.Settings) error {
 		m.set(StatusFailed, func(st *State) { st.Error = err.Error() })
 		return err
 	}
+	// The backend's own listeners must be free as well: something else holding
+	// them makes the core's psiphon fail to bind, which surfaces as a generic
+	// "stopped before it was ready" instead of pointing at the real conflict.
+	if IsPsiphonChain(s.ExitChain) {
+		ports := []int{PsiphonSocksPort}
+		if s.ExitChain != ChainPsiphonReverse {
+			ports = append(ports, PsiphonHTTPPort)
+		}
+		for _, p := range ports {
+			if err := ensureLocalPortAvailable(p); err != nil {
+				m.set(StatusFailed, func(st *State) { st.Error = err.Error() })
+				return err
+			}
+		}
+	}
 
-	if s.ExitChain == ChainPsiphon || s.ExitChain == ChainPsiphonOnly || s.ExitChain == ChainPsiphonReverse {
-		resetStalePsiphonState()
+	if IsPsiphonChain(s.ExitChain) {
+		// A leftover psiphon-tunnel-core keeps the datastore locked (the
+		// openDataStore timeout that failed every post-switch connect) and its
+		// listeners bound; clear both before the core spawns a new one.
+		killOrphanPsiphon()
+		resetPsiphonState()
 	}
 	env := envFor(s)
 	sess, err := m.core.Start(env, config.Dir())
@@ -676,35 +695,20 @@ func ChainSocksPort(s config.Settings) int {
 // identity file) so it can also clean it up - see resetStalePsiphonState.
 func PsiphonDir() string { return filepath.Join(config.Dir(), "psiphon") }
 
-// psiphonCleanMarker is written on a clean disconnect and removed at the
-// start of the next chained connect. If a connect finds no marker, the
-// previous session did not shut down cleanly.
-func psiphonCleanMarker() string { return filepath.Join(config.Dir(), "psiphon-clean") }
-
-// resetStalePsiphonState drops a Psiphon datastore left behind by a session
-// that was killed instead of stopped.
+// resetPsiphonState clears the Psiphon datastore so every chained session
+// starts from a known-good state.
 //
-// Why this exists: a force-killed psiphon-tunnel-core leaves its datastore
-// behind in a state where it never attempts another server - it prints its
-// egress regions and then just sits there, so every chained connect fails
-// with no error at all. Measured: after clearing the directory, WireGuard +
-// Psiphon connects in ~9s (exit ES); with the stale directory it never
-// connects on any transport.
-//
-// A clean shutdown is the common case, so the fast path is a single stat.
-func resetStalePsiphonState() {
-	marker := psiphonCleanMarker()
-	if _, err := os.Stat(marker); err == nil {
-		_ = os.Remove(marker) // consumed: the next crash must look dirty again
+// Psiphon is not safe to reuse across sessions here: a leftover process keeps
+// the BoltDB lock (openDataStore timeout) and a killed one leaves the store
+// in a state where it stops trying servers. Wiping costs a couple of seconds
+// of re-fetching the server list and is worth it - measured: ~9s from tunnel
+// up to "psiphon is ready" on a cold store, and never a silent hang.
+func resetPsiphonState() {
+	if err := os.RemoveAll(PsiphonDir()); err != nil {
+		logx.Warnf("[vpn] clearing the psiphon datastore: %v", err)
 		return
 	}
-	_ = os.RemoveAll(PsiphonDir())
-	logx.Infof("[vpn] clearing a stale psiphon datastore (previous session did not stop cleanly)")
-}
-
-// markPsiphonClean records that a chained session ended normally.
-func markPsiphonClean() {
-	_ = os.WriteFile(psiphonCleanMarker(), []byte("ok"), 0o644)
+	logx.Debugf("[vpn] psiphon datastore cleared for a fresh chained session")
 }
 
 // SystemProxyPort is the HTTP listener the Windows system proxy must point at
@@ -735,10 +739,12 @@ func (m *Manager) Disconnect() {
 	if err := m.core.Stop(); err != nil {
 		logx.Warnf("[vpn] core stop: %v", err)
 	}
-	// The core reaps Psiphon with the tunnel, so the datastore it leaves
-	// behind is reusable next time (see resetStalePsiphonState).
+	// The core does not always reap Psiphon when it is torn down (a protocol
+	// switch stops and restarts the core). An orphan holds the datastore lock
+	// and the backend ports, which used to fail every later chained connect -
+	// including back to the transport that had just worked.
 	if IsPsiphonChain(m.chain) {
-		markPsiphonClean()
+		killOrphanPsiphon()
 	}
 	m.mu.Lock()
 	m.chain = ChainNone
