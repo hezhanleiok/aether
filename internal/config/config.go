@@ -134,6 +134,15 @@ type Settings struct {
 	// geo-resolves to CN, a deny policy makes the core re-hop forever.
 	ExitLoc string `json:"exit_loc"`
 
+	// CustomEndpoint pins a hand-picked WireGuard-class endpoint ("ip:port"),
+	// overriding the core's own scan. This is the bridge to the proven-fast
+	// workflow: wgcf + warpscout (or any WARP endpoint scanner) measure real
+	// endpoint latency, pick the best, and paste it here. The core's own scan
+	// ranks by handshake RTT, which favours the nearest (often congested)
+	// edge; hand-picking the fastest endpoint is what restores throughput.
+	// Applied to WireGuard (AETHER_PEER) and Gool outer hop (AETHER_WIW_OUTER_PEER).
+	CustomEndpoint string `json:"custom_endpoint"`
+
 	// UI preferences
 	Language string `json:"language"` // zh-CN (default) | en-US
 	Theme    string `json:"theme"`    // light (default) | dark

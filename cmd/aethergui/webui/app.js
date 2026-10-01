@@ -762,6 +762,7 @@ const SCHEMA = [
       { k: 'auto_scan', type: 'switch', label: '自动扫描网关', label_en: 'Auto-scan gateways', hint: '取消勾选则使用固定网关', hint_en: 'Uncheck to honor the pinned gateway' },
       { k: 'auto_failover', type: 'switch', label: '自动故障转移', label_en: 'Auto-failover' },
       { k: 'cached_gateway', type: 'text', label: '固定网关 (ip:port)', label_en: 'Pinned gateway (ip:port)', hint: '留空则由核心扫描', hint_en: 'Empty = the core scans' },
+      { k: 'custom_endpoint', type: 'text', label: '自定义最快端点 (ip:port)', label_en: 'Custom fastest endpoint (ip:port)', hint: '用 warpscout/wgcf 实测出最快 WARP 端点后粘贴，速度可接近原生 WireGuard；仅 WG/Gool 生效', hint_en: 'Paste the fastest WARP endpoint from wgcf/warpscout; WG & Gool only' },
       { k: 'scan_mode', type: 'select', label: '扫描模式', label_en: 'Scan mode', options: [['turbo', 'Turbo'], ['balanced', 'Balanced'], ['thorough', 'Thorough'], ['stealth', 'Stealth'], ['ironclad', 'Ironclad']] },
     ],
   },

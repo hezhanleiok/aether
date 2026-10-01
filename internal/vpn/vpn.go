@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -355,6 +356,20 @@ func envFor(s config.Settings) map[string]string {
 		} else {
 			logx.Infof("[vpn] pinned gateway %s is not a %s endpoint; scanning instead",
 				s.CachedGateway, transportName(env["AETHER_PROTOCOL"]))
+		}
+	}
+	// A hand-picked endpoint overrides the scan entirely and skips the
+	// nearest-edge bias. This is how the fast workflow plugs in: measure
+	// endpoints with wgcf/warpscout, paste the winner, and the same WireGuard
+	// protocol runs over the good path instead of the nearest congested one.
+	if ep := validateEndpoint(s.CustomEndpoint); ep != "" {
+		switch env["AETHER_PROTOCOL"] {
+		case "wg":
+			set("AETHER_PEER", ep)
+		case "gool":
+			set("AETHER_WIW_OUTER_PEER", ep)
+		default:
+			logx.Infof("[vpn] custom endpoint %s ignored: not a WireGuard-class transport", ep)
 		}
 	}
 	if len(s.DNSServers) > 0 && s.DNSMode != config.DNSSystem {
@@ -746,6 +761,23 @@ func SystemProxyPort(s config.Settings) int {
 		return TorHTTPPort
 	}
 	return s.HTTPProxyPort
+}
+
+// validateEndpoint checks a user-pasted "ip:port" (optionally a bracketed
+// IPv6 "[::1]:port") and returns it trimmed, or "" when it is not usable.
+func validateEndpoint(raw string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(raw))
+	if err != nil || host == "" || port == "" {
+		return ""
+	}
+	if net.ParseIP(host) == nil {
+		return ""
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
+		return ""
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // sanitizeExitLoc validates a user-provided exit-country policy before it is
