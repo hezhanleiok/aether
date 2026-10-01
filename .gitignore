@@ -25,3 +25,5 @@ Aether-HEAD/
 !cmd/aethersetup/payload/bundle.zip
 # psiphon runtime state (created by the core beside the identity file)
 aether.toml-psiphon/
+# exported WireGuard config (contains the WARP private key)
+aether.conf

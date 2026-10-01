@@ -19,6 +19,8 @@ github.com/lxn/walk/declarative
 # github.com/lxn/win v0.0.0-20210218163916-a377121e959e
 ## explicit; go 1.12
 github.com/lxn/win
+# golang.org/x/crypto v0.57.0
+## explicit; go 1.26.0
 # golang.org/x/net v0.59.0
 ## explicit; go 1.26.0
 golang.org/x/net/internal/socks
@@ -27,6 +29,10 @@ golang.org/x/net/proxy
 ## explicit; go 1.26.0
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
+# golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
+## explicit; go 1.17
+# golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
+## explicit; go 1.23.1
 # gopkg.in/Knetic/govaluate.v3 v3.0.0
 ## explicit
 gopkg.in/Knetic/govaluate.v3
