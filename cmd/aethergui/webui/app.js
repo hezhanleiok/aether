@@ -346,6 +346,7 @@ function applySnapshot(next) {
   if (next.vpn.status === 'Connected' && prevStatus !== 'Connected') connectedAtMs = Date.now();
   if (next.vpn.status !== 'Connected' && next.vpn.status !== 'Connecting' && next.vpn.status !== 'Reconnecting') connectedAtMs = 0;
   render();
+  syncStackedLock();
 }
 
 // ── rendering ───────────────────────────────────────────────────
@@ -913,6 +914,21 @@ function syncSettingsUI() {
     if (input.type === 'checkbox') input.checked = !!v;
     else input.value = Array.isArray(v) ? v.join(',') : (v == null ? '' : String(v));
   }
+  syncStackedLock();
+}
+
+// syncStackedLock greys out the Warp-in-Warp switch unless the tunnel is fully
+// disconnected: flipping the protocol while a tunnel is up/coming up would
+// desync the config from the live connection. Safe no-op when the settings page
+// has not been rendered yet (no .set-row exists).
+function syncStackedLock() {
+  const row = document.querySelector('.set-row[data-k=stacked_wireguard]');
+  if (!row) return;
+  const input = row.querySelector('input[type=checkbox]');
+  if (!input) return;
+  const locked = !!(S && S.vpn && S.vpn.status !== 'Disconnected');
+  input.disabled = locked;
+  row.title = locked ? (lang === 'zh-CN' ? '请先断开连接再切换协议' : 'Disconnect before switching protocol') : '';
 }
 
 async function patch(obj) {
