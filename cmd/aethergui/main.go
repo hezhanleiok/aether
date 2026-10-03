@@ -16,10 +16,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/aethergui/aethergui/internal/app"
 	"github.com/aethergui/aethergui/internal/logx"
@@ -66,8 +68,32 @@ func main() {
 		uiMode      = flag.String("ui", "auto", "UI host: auto (WebView2 window), window, browser, none (service only)")
 		portFlag    = flag.Int("port", 0, "loopback port for the UI service (0 = pick a free one)")
 		printURL    = flag.Bool("print-url", false, "print the UI URL to stdout")
+		stackedFlag = flag.Bool("stacked", false, "run warp-in-warp (stacked) mode: outer from aether.toml, inner from -account")
+		accountFlag = flag.String("account", "", "path to the inner WARP account JSON (required with -stacked)")
 	)
 	flag.Parse()
+
+	// Route SIGINT/SIGTERM into the normal quit path instead of the default hard
+	// kill. This matters most in headless mode: a Ctrl+C must still run the
+	// deferred application.Close(), which tears down the native tunnel (revert
+	// routes/DNS/metric, close the wintun adapter) rather than leaking that state
+	// and black-holing the network until a reboot.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		s := <-sigCh
+		logx.Infof("[gui] signal %s received, shutting down", s)
+		requestQuit()
+	}()
+
+	// Stacked (warp-in-warp) mode: build the outer + inner configs and run the
+	// double tunnel directly, bypassing the app/Core state machine. Only present
+	// in wgtun builds (runStacked is stubbed out otherwise). The signal handler
+	// above is already armed, so Ctrl+C tears the stack down cleanly via quitCh.
+	if *stackedFlag {
+		runStacked(*accountFlag)
+		return
+	}
 
 	guiFS = uiAssets()
 

@@ -62,3 +62,16 @@ func TestReservedEncoding(t *testing.T) {
 		t.Fatalf("reserved encoding wrong: %v", got)
 	}
 }
+
+// TestHasHandshake verifies the UAPI handshake-dump parser used by WaitHandshake.
+func TestHasHandshake(t *testing.T) {
+	if hasHandshake("") {
+		t.Fatal("empty dump should report no handshake")
+	}
+	if hasHandshake("last_handshake_time_sec=0\nlast_handshake_time_nsec=0\n") {
+		t.Fatal("zero handshake time should report no handshake")
+	}
+	if !hasHandshake("private_key=deadbeef\nlast_handshake_time_sec=1700000000\nlast_handshake_time_nsec=123\n") {
+		t.Fatal("positive handshake time should report handshaken")
+	}
+}

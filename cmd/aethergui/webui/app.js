@@ -26,6 +26,7 @@ const STRINGS = {
     hintChain: '出口链已就绪：Aether → Psiphon → 互联网',
     exitChain: '出口方式', exitRegion: '出口地区', automatic: '自动（由 Psiphon 决定）',
     chainAether: 'Aether（默认）', chainPsiphon: 'Aether → Psiphon',
+    wgtun_residue: '上次异常退出有残留，需以管理员身份重启以自动清理',
   },
   'en-US': {
     home: 'Home', nodes: 'Nodes', split: 'Split', rules: 'Rules', settings: 'Settings', logs: 'Logs', about: 'About',
@@ -47,6 +48,7 @@ const STRINGS = {
     hintChain: 'Chain ready: Aether → Psiphon → internet',
     exitChain: 'Exit', exitRegion: 'Exit region', automatic: 'Automatic (Psiphon decides)',
     chainAether: 'Aether (default)', chainPsiphon: 'Aether → Psiphon',
+    wgtun_residue: 'Leftover from a previous unclean exit — restart as administrator to clean up',
   },
 };
 let lang = 'zh-CN';
@@ -723,6 +725,16 @@ function renderSplit() {
   $('#lanVal').innerHTML = S.settings.lan_access ? `<span class="badge ok">${tx('lanOn')}</span>` : `<span class="badge">${tx('lanOff')}</span>`;
   $('#pacVal').textContent = 'aether-split.pac';
   $('#btnKsToggle').textContent = st.killSwitch ? (lang === 'zh-CN' ? '关闭 Kill Switch' : 'Disable Kill Switch') : (lang === 'zh-CN' ? '启用 Kill Switch' : 'Enable Kill Switch');
+
+  const residueEl = $('#residueWarn');
+  if (residueEl) {
+    if (st.nativeResidue) {
+      residueEl.textContent = tx(st.nativeResidue);
+      residueEl.removeAttribute('hidden');
+    } else {
+      residueEl.setAttribute('hidden', '');
+    }
+  }
 }
 
 // ── rules ───────────────────────────────────────────────────────
@@ -750,6 +762,8 @@ const SCHEMA = [
   {
     name: '网络', name_en: 'Network', icon: 'i-wifi', rows: [
       { k: 'mode', type: 'select', label: '连接方式', label_en: 'Routing mode', options: [['full_vpn', '全局 VPN'], ['proxy', '全局代理'], ['split', '规则分流'], ['direct', '直连']] },
+      { k: 'native_wireguard', type: 'switch', label: '原生 WireGuard 加速', label_en: 'Native WireGuard boost', hint: 'wireguard-go + 虚拟网卡（内核速度）替代用户态核心，需管理员权限；仅 WG/WARP 模式生效', hint_en: 'wireguard-go + wintun at kernel speed; elevation required; WG/WARP modes only' },
+      { k: 'stacked_wireguard', type: 'switch', label: 'Warp-in-Warp 双层隧道', label_en: 'Warp-in-Warp stacked tunnel', hint: '外层 WARP 隧道承载内层 WARP 隧道，出口为二次注册的新身份；需开启原生 WireGuard 且已注册内层账号', hint_en: 'An outer WARP tunnel carries an inner one; egress is a freshly registered identity; needs Native WireGuard + a minted inner account' },
       { k: 'ip_stack', type: 'select', label: 'IP 协议栈', label_en: 'IP stack', hint: 'IPv4/IPv6 扫描策略', hint_en: 'IPv4/IPv6 scanning policy', options: [['ipv4', '仅 IPv4'], ['ipv6', '仅 IPv6'], ['dual', 'IPv4 + IPv6']] },
       { k: 'socks_port', type: 'number', label: '本地 SOCKS5 端口', label_en: 'Local SOCKS5 port' },
       { k: 'http_proxy_port', type: 'number', label: '本地 HTTP 代理端口', label_en: 'Local HTTP proxy port', hint: '0 = 关闭', hint_en: '0 = disabled' },

@@ -681,6 +681,18 @@ func (m *Manager) SetTrafficFailed(reason string) {
 	m.set(StatusTrafficFailed, func(st *State) { st.Error = reason })
 }
 
+// SetNativeState drives the state machine for the native WireGuard backend,
+// which owns its own tunnel and never touches the core. It is the manager-side
+// hook the app layer uses on the nativeWG path (Connect/Disconnect there run
+// wireguard-go + wintun instead of the core's SOCKS/netstack). All the usual
+// subscribers still receive the transition, so the UI is identical.
+func (m *Manager) SetNativeState(status Status, mode config.Mode, errMsg string) {
+	m.set(status, func(st *State) {
+		st.Mode = mode
+		st.Error = errMsg
+	})
+}
+
 // ExitsThroughChain reports whether the final egress is the backend's own
 // listener (as opposed to the Aether hop's 1819/1820). Reverse modes keep the
 // tunnel as the exit - the backend is only the entry - so health probes and

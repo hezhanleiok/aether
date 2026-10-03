@@ -33,6 +33,16 @@ type App struct {
 	Guard    *watchguard.Watch
 	Traffic  *TrafficSampler
 
+	// nativeWG holds the native WireGuard session (wireguard-go + wintun). It
+	// is a no-op type unless built with the "wgtun" tag - see nativewg.go and
+	// nativewg_stub.go.
+	nativeWG nativeWGHandle
+
+	// nativeStacked holds the warp-in-warp session (outer WARP tunnel carrying
+	// an inner WARP tunnel). Mutually exclusive with nativeWG: StackedWireGuard
+	// picks which one Connect() drives. Same build-tag story as nativeWG.
+	nativeStacked nativeStackedHandle
+
 	subMu   sync.Mutex
 	onState []func(vpn.State)
 	onNodes []func()
@@ -136,7 +146,9 @@ func New() (*App, error) {
 	// local line and reports "healthy" while the tunnel is dead. It is built
 	// per call so it always follows the current SOCKS port and the active
 	// exit chain (a chained session leaves through Psiphon's listener).
-	a.Guard = watchguard.New(watchguard.Config{}, a,
+	a.Guard = watchguard.New(watchguard.Config{
+		IgnoreIfnames: watchguardIgnoreIfnames(),
+	}, a,
 		func(ctx context.Context, network, addr string) (net.Conn, error) {
 			port := a.Settings.SocksPort
 			// Once the session is fully up and the backend carries the final
@@ -160,8 +172,45 @@ func New() (*App, error) {
 	// with nobody picking it up; route it to the normal reconnect path.
 	a.VPN.SetDropHook(a.TunnelDown)
 	a.Traffic = NewTrafficSampler(a)
+
+	// Start-up self-check for native-WG residue. Must not block: a non-elevated
+	// process with leftover routes/metric would otherwise be stuck. On failure
+	// we keep the program running; the residue warning is derived on demand by
+	// NativeResidue() (which checks the state file), so it always reflects the
+	// disk's real state.
+	if err := recoverNativeWGState(); err != nil {
+		logx.Warnf("[wgtun] residue: %v", err)
+	}
 	return a, nil
 }
+
+// watchguardIgnoreIfnames returns the interface-name prefixes watchguard should
+// ignore. With the native WireGuard backend it ignores the wintun virtual
+// interface (by prefix, since pool reuse suffixes it as "Xiaohe 1", ...);
+// without it the list is empty and nothing is ignored.
+func watchguardIgnoreIfnames() []string {
+	if nativeWGInterfaceName == "" {
+		return nil
+	}
+	return []string{nativeWGInterfaceName}
+}
+
+// NativeResidue reports the stable residue code for the current state (empty
+// means clean). It is derived on demand by checking the crash-recovery state
+// file, so it always reflects the disk's real state — a successful recovery
+// (which deletes the file) clears the warning on the next read without any
+// manual field sync. It is never a raw error.
+func (a *App) NativeResidue() string {
+	if nativeWGResiduePresent() {
+		return residueCode
+	}
+	return ""
+}
+
+// residueCode is the stable UI code for "previous unclean exit left residue".
+// The raw recovery error stays in the log; the UI maps this code to a localized
+// prompt (see the web UI i18n "wgtun_residue" key).
+const residueCode = "wgtun_residue"
 
 // OnState registers a UI state callback (multiple listeners supported).
 func (a *App) OnState(fn func(vpn.State)) {
@@ -347,6 +396,18 @@ func (a *App) Connect() error {
 		a.Disconnect()
 		return nil
 	}
+	// Native WireGuard backend: bypass the core and run the WARP identity
+	// through wireguard-go + wintun (a real TUN + routes + DNS). Only fires
+	// when enabled and in a WireGuard-class mode; the wgtun-tagged build is
+	// required, otherwise useNativeWG is always false. StackedWireGuard
+	// routes the same native path into warp-in-warp (two stacked WARP
+	// tunnels) instead of the single tunnel.
+	if a.useNativeWG(s) {
+		if s.StackedWireGuard {
+			return a.connectNativeStacked(s)
+		}
+		return a.connectNativeWG(s)
+	}
 	if err := a.VPN.Connect(s); err != nil {
 		return err
 	}
@@ -441,6 +502,10 @@ func (a *App) connectWatchdog() {
 
 // Disconnect stops everything and restores the system state.
 func (a *App) Disconnect() {
+	// The native tunnel must be torn down (routes + DNS reverted) before the
+	// rest of the cleanup, so its default route never shadows the other steps.
+	a.disconnectNativeStacked()
+	a.disconnectNativeWG()
 	a.Guard.SetUp(false)
 	a.VPN.Disconnect()
 	a.Pool.ClearStatus()

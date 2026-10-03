@@ -27,3 +27,6 @@ Aether-HEAD/
 aether.toml-psiphon/
 # exported WireGuard config (contains the WARP private key)
 aether.conf
+# any private-key material, wherever it lands, must never be committed
+*.conf
+*.key

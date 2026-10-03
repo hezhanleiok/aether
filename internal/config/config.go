@@ -62,6 +62,22 @@ type Settings struct {
 	// Protocol transport overrides (empty = follow mode)
 	PreferredProfile string `json:"preferred_profile"` // noize profile
 
+	// NativeWireGuard runs the WARP transport through wireguard-go + a wintun
+	// TUN adapter (kernel speed) instead of Aether's user-space netstack. It
+	// reuses the same WARP identity the core provisioned in aether.toml. OFF
+	// by default: it needs elevation, and it only takes effect in a build that
+	// actually ships the backend (the "wgtun" build tag) - elsewhere the field
+	// is inert.
+	NativeWireGuard bool `json:"native_wireguard"`
+
+	// StackedWireGuard upgrades the native WireGuard path to warp-in-warp: an
+	// outer WARP tunnel (aether.toml identity) carries an inner WARP tunnel
+	// (newest account under warp-accounts/), so the egress is a second,
+	// freshly-registered identity. Implies the native backend (same wintun +
+	// elevation requirements); only meaningful in WireGuard-class modes and in
+	// wgtun builds. OFF by default.
+	StackedWireGuard bool `json:"stacked_wireguard"`
+
 	// Networking
 	IPStack       IPMode `json:"ip_stack"`
 	SocksPort     int    `json:"socks_port"`

@@ -138,6 +138,9 @@ type SystemInfo struct {
 	SysProxy   bool `json:"sysProxy"`
 	KillSwitch bool `json:"killSwitch"`
 	AutoStart  bool `json:"autoStart"`
+	// NativeResidue is the residue-left-behind prompt from a previous unclean
+	// native-WG exit (empty when clean); the UI shows it and asks for elevation.
+	NativeResidue string `json:"nativeResidue"`
 }
 
 // Snapshot is the complete UI state, pushed on every meaningful change.
@@ -225,9 +228,10 @@ func (b *Bridge) snapshot() Snapshot {
 		Testing:    a.NodesTesting(),
 		Probing:    a.NodesProbing(),
 		System: SystemInfo{
-			SysProxy:   sysproxy.Taken(),
-			KillSwitch: killswitch.Enabled(),
-			AutoStart:  s.AutoStart,
+			SysProxy:      sysproxy.Taken(),
+			KillSwitch:    killswitch.Enabled(),
+			AutoStart:     s.AutoStart,
+			NativeResidue: a.NativeResidue(),
 		},
 		Now: time.Now().UnixMilli(),
 	}

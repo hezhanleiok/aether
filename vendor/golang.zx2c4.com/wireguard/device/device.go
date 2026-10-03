@@ -20,8 +20,13 @@ import (
 type Device struct {
 	// reserved holds the three bytes that follow the message type in the
 	// handshake initiation. Standard WireGuard leaves them zero; Cloudflare
-	// WARP uses them as a client identifier. Set via SetReserved before the
-	// first handshake. (Xiaohe WARP patch.)
+	// WARP uses them as a client identifier.
+	//
+	// RACE CONSTRAINT (Xiaohe WARP patch): this field is intentionally
+	// lock-free and MUST be written exactly once via SetReserved, BEFORE the
+	// device is brought Up and the first handshake fires. Once Up, the
+	// handshake goroutine reads it concurrently with no lock - do not write it
+	// from anywhere else or after Up.
 	reserved [3]byte
 
 	state struct {
@@ -289,8 +294,12 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 
 // SetReserved sets the three reserved bytes written after the message type in
 // every handshake initiation. Cloudflare WARP uses them as a client identifier
-// and rejects initiations whose reserved bytes are zero. Call this once before
-// the first handshake (Xiaohe WARP patch).
+// and rejects initiations whose reserved bytes are zero.
+//
+// MUST be called exactly once, before Up() and the first handshake. The field
+// is lock-free and is read by the handshake goroutine once the device is Up,
+// so calling this after Up() (or from another goroutine) is a data race that
+// will corrupt the handshake. (Xiaohe WARP patch.)
 func (device *Device) SetReserved(reserved [3]byte) {
 	device.reserved = reserved
 }

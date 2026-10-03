@@ -247,6 +247,7 @@ func (device *Device) RoutineReadFromTUN() {
 
 			elem := elems[i]
 			elem.packet = bufs[i][offset : offset+sizes[i]]
+			device.log.Verbosef("[DUMP-TUN] read from TUN: len=%d", len(elem.packet))
 
 			// lookup peer
 			var peer *Peer
@@ -270,6 +271,9 @@ func (device *Device) RoutineReadFromTUN() {
 			}
 
 			if peer == nil {
+				if elem.packet[0]>>4 == 4 || elem.packet[0]>>4 == 6 {
+					device.log.Verbosef("[DUMP-TUN] no peer for dst=%s — dropped", net.IP(elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]).String())
+				}
 				continue
 			}
 			elemsForPeer, ok := elemsByPeer[peer]
@@ -287,6 +291,7 @@ func (device *Device) RoutineReadFromTUN() {
 				peer.StagePackets(elemsForPeer)
 				peer.SendStagedPackets()
 			} else {
+				device.log.Verbosef("[DUMP-TUN] peer not running — dropped %d staged packet(s)", len(elemsForPeer.elems))
 				for _, elem := range elemsForPeer.elems {
 					device.PutMessageBuffer(elem.buffer)
 					device.PutOutboundElement(elem)
@@ -342,6 +347,7 @@ top:
 
 	keypair := peer.keypairs.Current()
 	if keypair == nil || keypair.sendNonce.Load() >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
+		peer.device.log.Verbosef("[DUMP-SEND] staged packets waiting: no usable keypair, (re)initiating handshake")
 		peer.SendHandshakeInitiation(false)
 		return
 	}
@@ -509,6 +515,7 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		for _, elem := range elemsContainer.elems {
 			if len(elem.packet) != MessageKeepaliveSize {
 				dataSent = true
+				device.log.Verbosef("[DUMP-SEND] sending data packet: len=%d", len(elem.packet))
 			}
 			bufs = append(bufs, elem.packet)
 		}
