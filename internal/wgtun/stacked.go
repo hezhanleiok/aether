@@ -3,6 +3,7 @@
 package wgtun
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -50,7 +51,13 @@ type StackedTunnel struct {
 // NewStackedTunnel brings up the outer tunnel first, then the inner tunnel whose
 // endpoint is routed through the outer wintun adapter. outerCfg/innerCfg must
 // use different WARP accounts and different InterfaceNames.
-func NewStackedTunnel(outerCfg, innerCfg Config) (*StackedTunnel, error) {
+func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase func(string)) (*StackedTunnel, error) {
+	// phase reports progress to the UI; nil-safe so callers may pass nil.
+	phase := func(p string) {
+		if onPhase != nil {
+			onPhase(p)
+		}
+	}
 	// MTU: defaults already set by BuildStacked (outer 1440 / inner 1360).
 	// Only patch the inner up if a caller injected a custom outer MTU without
 	// deriving its own inner value (inner must fit inside the outer: wire
@@ -92,13 +99,14 @@ func NewStackedTunnel(outerCfg, innerCfg Config) (*StackedTunnel, error) {
 	// endpoint is captured by the outer /32 host route and loops inside the
 	// outer tunnel (observed as mass "Failed to send data packets: short
 	// buffer" on the outer peer and an inner handshake that never completes).
-	connectedOuter, err := probeEndpoints(outer,
-		excludeEndpoint(buildCandidates(outerCfg.Endpoint), innerCfg.Endpoint))
+	connectedOuter, err := probeEndpoints(ctx, outer,
+		excludeEndpoint(buildCandidates(outerCfg.Endpoint), innerCfg.Endpoint), phase)
 	if err != nil {
 		_ = outer.Down()
 		return nil, fmt.Errorf("wgtun: outer handshake: %w", err)
 	}
 	outerCfg.Endpoint = connectedOuter
+	phase("outer-handshake")
 	if err := outerRM.applyHostRouteOnly(connectedOuter); err != nil {
 		_ = outer.Down()
 		return nil, fmt.Errorf("wgtun: outer endpoint route: %w", err)
@@ -184,11 +192,13 @@ func NewStackedTunnel(outerCfg, innerCfg Config) (*StackedTunnel, error) {
 		return nil, fmt.Errorf("wgtun: inner up: %w", err)
 	}
 
+	phase("inner-handshake")
 	if err := inner.WaitHandshake(stackedHandshakeTimeout); err != nil {
 		s.teardownInner()
 		s.teardownOuter()
 		return nil, fmt.Errorf("wgtun: inner handshake: %w", err)
 	}
+	phase("route-flip")
 	if err := innerRM.ApplyDefaultRoutes(); err != nil {
 		s.teardownInner()
 		s.teardownOuter()
@@ -200,6 +210,7 @@ func NewStackedTunnel(outerCfg, innerCfg Config) (*StackedTunnel, error) {
 		return nil, err
 	}
 
+	phase("up")
 	logx.Infof("[wgtun] stacked up: outer=%s inner=%s (inner endpoint via outer ifIndex %d)",
 		outerCfg.Endpoint, innerCfg.Endpoint, ifIndex)
 	return s, nil

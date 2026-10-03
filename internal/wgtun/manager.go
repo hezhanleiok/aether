@@ -3,6 +3,7 @@
 package wgtun
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -32,7 +33,7 @@ func (m *Manager) Running() bool {
 // and installs routes + DNS. It requires elevation (wintun driver + HKLM).
 // On any failure it tears down whatever it already created, so a failed Start
 // leaves the machine exactly as it was.
-func (m *Manager) Start(cfg Config) error {
+func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.tunnel != nil {
@@ -70,7 +71,7 @@ func (m *Manager) Start(cfg Config) error {
 		return err
 	}
 
-	connected, err := m.probeEndpoint(t, candidates)
+	connected, err := m.probeEndpoint(ctx, t, candidates, onPhase)
 	if err != nil {
 		_ = t.Down()
 		return err
@@ -109,19 +110,42 @@ func (m *Manager) Start(cfg Config) error {
 // first chance, which is the practical "speed preference" under rate limiting.
 // The wintun adapter stays up the whole time; each switch is a UAPI
 // remove+recreate of the peer.
-func (m *Manager) probeEndpoint(t *tunnel, candidates []string) (string, error) {
-	return probeEndpoints(t, candidates)
+func (m *Manager) probeEndpoint(ctx context.Context, t *tunnel, candidates []string, onPhase func(string)) (string, error) {
+	return probeEndpoints(ctx, t, candidates, onPhase)
 }
 
 // probeEndpoints is the endpoint-probe loop shared by the single tunnel
 // (Manager.Start) and the stacked outer layer: walk candidates, hot-switch the
 // peer endpoint via UAPI, and return the first one whose handshake completes.
-func probeEndpoints(t *tunnel, candidates []string) (string, error) {
+// probePhase formats the endpoint-probe progress label shown while a connect is
+// sweeping candidates. Pure function so the UI label is unit-testable.
+func probePhase(done, total int) string {
+	return fmt.Sprintf("probe %d/%d", done, total)
+}
+
+// probeEndpoints is the endpoint-probe loop shared by the single tunnel
+// (Manager.Start) and the stacked outer layer: walk candidates, hot-switch the
+// peer endpoint via UAPI, and return the first one whose handshake completes.
+// onPhase, when non-nil, receives throttled progress labels (first, every 8th,
+// and the last candidate) so the UI can show "probe 37/112" without one log
+// line per candidate. When ctx is already cancelled at a candidate boundary the
+// loop returns immediately and onPhase is never called.
+func probeEndpoints(ctx context.Context, t *tunnel, candidates []string, onPhase func(string)) (string, error) {
 	cache := loadCache()
 	defer cache.save()
 
 	var lastErr error
 	for i, ep := range candidates {
+		// Cancel takes effect at the candidate boundary, so a cancel while one
+		// handshake is in flight returns as soon as that probe finishes and the
+		// next gap is reached. (Interrupting the in-flight handshake itself is a
+		// later hardening; the loop exit already stops the sweep.)
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if onPhase != nil && (i == 0 || i == len(candidates)-1 || (i+1)%8 == 0) {
+			onPhase(probePhase(i+1, len(candidates)))
+		}
 		logx.Infof("[wgtun] probing endpoint %d/%d: %s", i+1, len(candidates), ep)
 		// The first candidate is already configured by Up(); switching to it
 		// again would be churn.

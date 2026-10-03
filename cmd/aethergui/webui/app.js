@@ -450,7 +450,7 @@ function renderHome() {
   const inChain = v.status === 'AetherConnected' || v.status === 'StartingPsiphon' || v.status === 'PsiphonConnecting';
   $('#heroHint').textContent = v.status === 'Connected'
     ? (v.chain === 'psiphon' ? tx('hintChain') : tx('hintOn'))
-    : (v.status === 'Connecting' || v.status === 'Reconnecting' || inChain) ? tx('hintConnecting')
+    : (v.status === 'Connecting' || v.status === 'Reconnecting' || inChain) ? (v.phase || tx('hintConnecting'))
       : (v.status === 'Failed' || v.status === 'TrafficTestFailed') ? (v.error || tx('failed')) : tx('hintOff');
 
   const connected = v.status === 'Connected';
@@ -1100,7 +1100,8 @@ function toast(msg, kind) {
 function bind() {
   $('#powerBtn').onclick = async () => {
     const st = S.vpn.status;
-    if (st === 'Connected' || st === 'Connecting' || st === 'Reconnecting') await api('/api/disconnect');
+    if (st === 'Connecting' || st === 'Reconnecting') await api('/api/cancel');
+    else if (st === 'Connected') await api('/api/disconnect');
     else {
       if (!S.version.core || S.version.coreHealth === 'Missing') toast(tx('needCore'), 'err');
       await api('/api/connect');

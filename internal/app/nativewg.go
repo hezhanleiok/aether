@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -55,12 +56,13 @@ func (a *App) useNativeWG(s config.Settings) bool {
 // routes + DNS) and drives the shared state machine to Connected. It bypasses
 // the core entirely: the WARP identity the core provisioned is run at kernel
 // speed. Requires elevation (the wintun driver and the HKLM DNS write).
-func (a *App) connectNativeWG(s config.Settings) error {
+func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
 	if a.nativeWG != nil && a.nativeWG.Running() {
 		return nil
 	}
 	a.VPN.SetNativeState(vpn.StatusConnecting, s.Mode, "")
-
 	cfg, err := wgtun.LoadIdentity(config.Dir(), s.CustomEndpoint)
 	if err != nil {
 		a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, err.Error())
@@ -68,7 +70,7 @@ func (a *App) connectNativeWG(s config.Settings) error {
 	}
 
 	m := &wgtun.Manager{}
-	if err := m.Start(cfg); err != nil {
+	if err := m.Start(ctx, cfg, nil); err != nil {
 		a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, err.Error())
 		return err
 	}
@@ -123,11 +125,22 @@ func newestInnerAccount(dir string) (string, error) {
 // aether.toml, inner from the newest registered account, inner endpoint routed
 // through the outer adapter. Drives the same shared state machine the single
 // native tunnel uses, so the UI needs no special casing.
-func (a *App) connectNativeStacked(s config.Settings) error {
+// connectEnterHook is a test seam: if non-nil it runs at the very start of the
+// native (including stacked) connect, under the connect lock, so tests can
+// observe/serialize concurrent connects. Production leaves it nil.
+var connectEnterHook func()
+
+func (a *App) connectNativeStacked(ctx context.Context, s config.Settings) error {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	if connectEnterHook != nil {
+		connectEnterHook()
+	}
 	if a.nativeStacked != nil {
 		return nil // already up (Up() is idempotent-safe; a second connect is a no-op)
 	}
 	a.VPN.SetNativeState(vpn.StatusConnecting, s.Mode, "")
+	onPhase := func(p string) { a.VPN.SetPhase(p) }
 
 	account, err := newestInnerAccount(config.Dir())
 	if err != nil {
@@ -140,7 +153,7 @@ func (a *App) connectNativeStacked(s config.Settings) error {
 		a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, err.Error())
 		return err
 	}
-	st, err := wgtun.NewStackedTunnel(outerCfg, innerCfg)
+	st, err := wgtun.NewStackedTunnel(ctx, outerCfg, innerCfg, onPhase)
 	if err != nil {
 		a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, err.Error())
 		return err

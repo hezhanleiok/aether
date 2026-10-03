@@ -5,11 +5,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -47,7 +49,33 @@ type App struct {
 	onState []func(vpn.State)
 	onNodes []func()
 	onCore  []func()
+
+	// connecting is a CAS guard: set true at the entry of Connect() and reset
+	// (false) on every exit via a deferred Store. It lets a second concurrent
+	// Connect() fail fast with ErrAlreadyConnecting instead of blocking behind
+	// connMu for the whole probe (worst case ~224s). connMu still serializes
+	// connect/disconnect; this flag only rejects re-entrancy.
+	connecting atomic.Bool
+
+	// connMu serializes connect/disconnect of the native (incl. stacked) backend
+	// so a connect and a disconnect (or two connects) can never interleave. The
+	// dangerous case was two stacked connects racing through the probe loop and
+	// building two wintun stacks; this lock makes the second wait for the first
+	// to finish. disconnectNative* run under this lock; the connect* functions
+	// take it themselves.
+	connMu sync.Mutex
+	// cancelMu guards connectCancel, written by Connect and read by CancelConnect.
+	// Kept separate from connMu so a cancel never blocks on an in-progress
+	// connect (which holds connMu for the whole probe).
+	cancelMu      sync.Mutex
+	connectCancel context.CancelFunc
 }
+
+// ErrAlreadyConnecting is returned by Connect() when a connect is already in
+// progress. The caller must not retry until the in-flight connect finishes
+// (success, failure, or cancel). It replaces the old "block behind connMu for
+// the whole probe" behavior so a second click fails fast instead of waiting.
+var ErrAlreadyConnecting = errors.New("aether: connect already in progress")
 
 // pickBackend chooses the core driver per settings: an explicit kind wins;
 // otherwise library when the dll is present, else process. All local checks.
@@ -389,6 +417,13 @@ func (a *App) GatewayUnhealthy() {
 
 // Connect starts the VPN honoring the current settings and mode.
 func (a *App) Connect() error {
+	// Reject re-entrancy immediately (no blocking): a second Connect while one
+	// is probing must fail fast, not wait behind connMu for up to ~224s. The
+	// deferred Store resets the flag on every exit (success, failure, cancel).
+	if !a.connecting.CompareAndSwap(false, true) {
+		return ErrAlreadyConnecting
+	}
+	defer a.connecting.Store(false)
 	s := a.Settings
 	// A fresh, user-initiated connect starts the gool exit search over. The
 	// guard's own retries must not reset the counter, or it would loop forever.
@@ -396,6 +431,20 @@ func (a *App) Connect() error {
 		a.Disconnect()
 		return nil
 	}
+	// The connect's context is cancelled by CancelConnect (GUI cancel button,
+	// 2b) or on return; it threads into the probe loop so a cancel stops a long
+	// endpoint sweep instead of waiting it out.
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancelMu.Lock()
+	a.connectCancel = cancel
+	a.cancelMu.Unlock()
+	defer func() {
+		a.cancelMu.Lock()
+		a.connectCancel = nil
+		a.cancelMu.Unlock()
+		cancel()
+	}()
+
 	// Native WireGuard backend: bypass the core and run the WARP identity
 	// through wireguard-go + wintun (a real TUN + routes + DNS). Only fires
 	// when enabled and in a WireGuard-class mode; the wgtun-tagged build is
@@ -404,9 +453,9 @@ func (a *App) Connect() error {
 	// tunnels) instead of the single tunnel.
 	if a.useNativeWG(s) {
 		if s.StackedWireGuard {
-			return a.connectNativeStacked(s)
+			return a.connectNativeStacked(ctx, s)
 		}
-		return a.connectNativeWG(s)
+		return a.connectNativeWG(ctx, s)
 	}
 	if err := a.VPN.Connect(s); err != nil {
 		return err
@@ -502,6 +551,13 @@ func (a *App) connectWatchdog() {
 
 // Disconnect stops everything and restores the system state.
 func (a *App) Disconnect() {
+	// Defensive reset of the connect guard: a connect in flight is being torn
+	// down here, so any flag it left must not leak into the next Connect (e.g.
+	// a Reconnect's Connect). The authoritative reset is the deferred Store in
+	// Connect(); this is belt-and-suspenders against a stale true.
+	a.connecting.Store(false)
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
 	// The native tunnel must be torn down (routes + DNS reverted) before the
 	// rest of the cleanup, so its default route never shadows the other steps.
 	a.disconnectNativeStacked()
@@ -516,6 +572,20 @@ func (a *App) Disconnect() {
 		if err := killswitch.Disable(); err != nil {
 			logx.Warnf("[app] kill switch disable failed: %v", err)
 		}
+	}
+}
+
+// CancelConnect aborts an in-progress connect by cancelling its context. The
+// probe loop checks the context at each candidate boundary, so a long sweep
+// stops promptly rather than running to completion. Safe to call when no connect
+// is running (no-op). This is the mechanism behind the GUI cancel button (2b)
+// and a future watchdog stop path.
+func (a *App) CancelConnect() {
+	a.cancelMu.Lock()
+	cancel := a.connectCancel
+	a.cancelMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 

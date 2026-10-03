@@ -3,6 +3,8 @@
 package main
 
 import (
+	"context"
+
 	"github.com/aethergui/aethergui/internal/config"
 	"github.com/aethergui/aethergui/internal/logx"
 	"github.com/aethergui/aethergui/internal/wgtun"
@@ -29,7 +31,11 @@ func runStacked(accountPath string) {
 		return
 	}
 
-	st, err := wgtun.NewStackedTunnel(outerCfg, innerCfg)
+	// Cancel the probe/connect if a quit signal arrives, so Ctrl+C during the
+	// (potentially long) endpoint sweep doesn't hang until it finishes.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { <-quitCh; cancel() }()
+	st, err := wgtun.NewStackedTunnel(ctx, outerCfg, innerCfg, nil)
 	if err != nil {
 		logx.Errorf("[main] stacked up: %v", err)
 		return

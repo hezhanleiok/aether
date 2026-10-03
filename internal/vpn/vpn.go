@@ -78,6 +78,7 @@ type State struct {
 	Gateway     string      `json:"gateway"`
 	Transport   string      `json:"transport"`
 	Error       string      `json:"error"`
+	Phase       string      `json:"phase"`
 	StartedAt   time.Time   `json:"started_at"`
 	CoreRunning bool        `json:"core_running"`
 
@@ -690,7 +691,26 @@ func (m *Manager) SetNativeState(status Status, mode config.Mode, errMsg string)
 	m.set(status, func(st *State) {
 		st.Mode = mode
 		st.Error = errMsg
+		// Clear any in-flight phase label when leaving the connecting state so
+		// a stale "inner-handshake" can't linger after success/failure/cancel.
+		// Phase is only read by the UI while Connecting/Reconnecting, so the
+		// stacked "up" label that briefly precedes Connected is harmlessly
+		// dropped here.
+		if st.Status != StatusConnecting && st.Status != StatusReconnecting {
+			st.Phase = ""
+		}
 	})
+}
+
+// SetPhase reports a human-readable progress label for an in-flight connect
+// (e.g. "probe 37/112", "inner-handshake", "up"). It feeds the UI's connecting
+// state over SSE without touching Status, so the connect/disconnect state
+// machine is unaffected. Empty clears the label.
+func (m *Manager) SetPhase(phase string) {
+	m.mu.Lock()
+	m.st.Phase = phase
+	m.mu.Unlock()
+	m.publish()
 }
 
 // ExitsThroughChain reports whether the final egress is the backend's own

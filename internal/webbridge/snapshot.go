@@ -113,6 +113,7 @@ type VPNInfo struct {
 	Gateway      string    `json:"gateway"`
 	GatewayName  string    `json:"gatewayName"`
 	Error        string    `json:"error"`
+	Phase        string    `json:"phase"`
 	StartedAt    time.Time `json:"startedAt"`
 	DurationSec  int64     `json:"durationSec"`
 	LocalIP      string    `json:"localIP"`
@@ -205,6 +206,7 @@ func (b *Bridge) snapshot() Snapshot {
 			Gateway:      st.Gateway,
 			GatewayName:  gatewayName(a, st.Gateway),
 			Error:        st.Error,
+			Phase:        st.Phase,
 			StartedAt:    st.StartedAt,
 			DurationSec:  dur,
 			LocalIP:      localIPv4(),

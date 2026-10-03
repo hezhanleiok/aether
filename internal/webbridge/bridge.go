@@ -154,6 +154,7 @@ func (b *Bridge) Handler() http.Handler {
 	mux.HandleFunc("/api/connect", b.guard(b.connect))
 	mux.HandleFunc("/api/disconnect", b.guard(b.disconnect))
 	mux.HandleFunc("/api/reconnect", b.guard(b.reconnect))
+	mux.HandleFunc("/api/cancel", b.guard(b.cancel))
 	mux.HandleFunc("/api/protocol", b.guard(b.setProtocol))
 	mux.HandleFunc("/api/mode", b.guard(b.setMode))
 	mux.HandleFunc("/api/nodes/test", b.guard(b.testNodes))
@@ -332,6 +333,13 @@ func (b *Bridge) stream(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (b *Bridge) connect(w http.ResponseWriter, r *http.Request) {
+	// A connect already in progress must fail fast with a clear code rather than
+	// queue behind it. The app layer also rejects re-entrancy (ErrAlreadyConnecting),
+	// but answering here avoids even spawning the goroutine.
+	if st := b.app.VPN.State().Status; st == vpn.StatusConnecting || st == vpn.StatusReconnecting {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "already_connecting"})
+		return
+	}
 	go func() {
 		if err := b.app.Connect(); err != nil {
 			logx.Errorf("[ui] connect: %v", err)
@@ -347,6 +355,13 @@ func (b *Bridge) disconnect(w http.ResponseWriter, _ *http.Request) {
 
 func (b *Bridge) reconnect(w http.ResponseWriter, _ *http.Request) {
 	go b.app.Reconnect()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// cancel aborts an in-progress connect (probe sweep) via context cancellation.
+// It is the GUI cancel button's backend; safe no-op when no connect is running.
+func (b *Bridge) cancel(w http.ResponseWriter, _ *http.Request) {
+	b.app.CancelConnect()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

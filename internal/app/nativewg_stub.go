@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/aethergui/aethergui/internal/config"
@@ -30,13 +31,17 @@ func nativeWGResiduePresent() bool { return false }
 // path is the only path.
 func (a *App) useNativeWG(s config.Settings) bool { return false }
 
-func (a *App) connectNativeWG(s config.Settings) error {
+func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
 	return fmt.Errorf("native WireGuard backend not compiled (build with -tags wgtun)")
 }
 
 func (a *App) disconnectNativeWG() {}
 
-func (a *App) connectNativeStacked(s config.Settings) error {
+func (a *App) connectNativeStacked(ctx context.Context, s config.Settings) error {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
 	return fmt.Errorf("stacked backend not compiled (build with -tags wgtun)")
 }
 
