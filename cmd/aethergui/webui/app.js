@@ -917,16 +917,22 @@ function syncSettingsUI() {
   syncStackedLock();
 }
 
-// syncStackedLock greys out the Warp-in-Warp switch unless the tunnel is fully
-// disconnected: flipping the protocol while a tunnel is up/coming up would
-// desync the config from the live connection. Safe no-op when the settings page
-// has not been rendered yet (no .set-row exists).
+// syncStackedLock greys out the Warp-in-Warp switch only while the tunnel is
+// busy (live or transitional). It mirrors backend tunnelBusy(): Failed,
+// Disconnected, Unavailable and TrafficTestFailed are all safe — Failed is a
+// terminal state the user must be able to switch out of to retry. Safe no-op
+// when the settings page has not been rendered yet (no .set-row exists).
 function syncStackedLock() {
   const row = document.querySelector('.set-row[data-k=stacked_wireguard]');
   if (!row) return;
   const input = row.querySelector('input[type=checkbox]');
   if (!input) return;
-  const locked = !!(S && S.vpn && S.vpn.status !== 'Disconnected');
+  const st = S && S.vpn && S.vpn.status;
+  // Same busy set as backend tunnelBusy(): a live/transitional tunnel would
+  // desync config from the live connection if flipped. Failed is deliberately
+  // NOT in this list so a failed tunnel can still be reconfigured.
+  const locked = st === 'Connecting' || st === 'Connected' || st === 'Reconnecting' ||
+    st === 'AetherConnected' || st === 'StartingPsiphon' || st === 'PsiphonConnecting' || st === 'Testing';
   input.disabled = locked;
   row.title = locked ? (lang === 'zh-CN' ? '请先断开连接再切换协议' : 'Disconnect before switching protocol') : '';
 }

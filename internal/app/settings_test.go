@@ -60,3 +60,40 @@ func TestReconcileStackedWireGuard(t *testing.T) {
 		t.Errorf("busy no-change: got %v, want %v", got.StackedWireGuard, false)
 	}
 }
+
+// TestStackedWireGuardStateGuards maps every VPN status to whether flipping
+// StackedWireGuard is allowed. It pins the contract the GUI relies on: only the
+// busy (live/transitional) states block the switch, while Disconnected, Failed,
+// Unavailable and TrafficTestFailed all permit a change. Failed in particular
+// must stay unlocked — a failed tunnel is terminal and the user must be able to
+// switch protocol and retry (regression guard for the frontend switch locking up
+// on Failed, which was stricter than the backend tunnelBusy guard).
+func TestStackedWireGuardStateGuards(t *testing.T) {
+	cur := config.Settings{StackedWireGuard: false}
+	next := config.Settings{StackedWireGuard: true}
+
+	cases := []struct {
+		st   vpn.Status
+		want bool // true: change honoured (allowed); false: reverted (blocked)
+	}{
+		{vpn.StatusDisconnected, true},
+		{vpn.StatusFailed, true}, // terminal: user must be able to switch and retry
+		{vpn.StatusUnavailable, true},
+		{vpn.StatusTrafficFailed, true},
+		{vpn.StatusConnecting, false},
+		{vpn.StatusConnected, false},
+		{vpn.StatusReconnecting, false},
+		{vpn.StatusTesting, false},
+		{vpn.StatusAetherUp, false},
+		{vpn.StatusStartingPsiphon, false},
+		{vpn.StatusPsiphonConnecting, false},
+	}
+	for _, c := range cases {
+		busy := tunnelBusy(c.st)
+		got := reconcileStackedWireGuard(next, cur, busy)
+		honoured := got.StackedWireGuard == true
+		if honoured != c.want {
+			t.Errorf("status %q: change honoured=%v, want %v (tunnelBusy=%v)", c.st, honoured, c.want, busy)
+		}
+	}
+}
