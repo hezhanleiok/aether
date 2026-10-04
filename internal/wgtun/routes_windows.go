@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"unsafe"
 
@@ -43,6 +44,11 @@ type routeManager struct {
 	// back. Index 0 = IPv4, 1 = IPv6.
 	ifMetric [2]ifMetricState
 
+	// linkMetric is the physical-link snapshot taken when this routeManager was
+	// created (i.e. before its first mutation). It is persisted by writeState so
+	// a hard kill can restore it on the next launch.
+	linkMetric []linkMetricJSON
+
 	added []windows.MibIpForwardRow2
 }
 
@@ -53,9 +59,11 @@ type ifMetricState struct {
 	auto   uint8
 }
 
-// newRouteManager captures the adapter LUID and the DNS servers to install.
+// newRouteManager captures the adapter LUID and the DNS servers to install. It
+// also snapshots the physical link's metric right away, so writeState (which
+// runs before the first mutation) can persist it for crash recovery.
 func newRouteManager(luid uint64, dns []string) *routeManager {
-	return &routeManager{luid: luid, dns: dns}
+	return &routeManager{luid: luid, dns: dns, linkMetric: snapshotLinkMetrics()}
 }
 
 // ApplyEndpointRoute performs the pre-handshake steps: it persists the
@@ -64,16 +72,11 @@ func newRouteManager(luid uint64, dns []string) *routeManager {
 // route, so handshake packets keep a real path. Call right after Up(); wait for
 // the handshake; then ApplyDefaultRoutes, then ApplyDNS.
 func (m *routeManager) ApplyEndpointRoute(endpoint string) error {
-	epIP, epFamily, err := parseEndpointIP(endpoint)
-	if err != nil {
-		return err
-	}
-
 	// Physical default route, captured before any change. Also proves the
 	// family actually has connectivity to pin the endpoint onto.
-	phys, err := defaultRoute(epFamily)
+	phys, err := defaultRoute(endpointFamily(endpoint))
 	if err != nil {
-		return fmt.Errorf("wgtun: no %s default route to pin the endpoint on: %w", familyName(epFamily), err)
+		return fmt.Errorf("wgtun: no default route to pin %s on: %w", endpoint, err)
 	}
 
 	// Persist the pre-change state (metric/DNS/LUID) BEFORE the first system
@@ -93,17 +96,117 @@ func (m *routeManager) ApplyEndpointRoute(endpoint string) error {
 
 	// Endpoint host route FIRST, on the physical link, so the handshake keeps
 	// a real path once the default route flips.
-	epLen := uint8(32)
-	if epFamily == windows.AF_INET6 {
-		epLen = 128
-	}
-	if err := m.add(makeRoute(epSockaddr(epIP, epFamily), epLen, phys.NextHop, phys.InterfaceLuid, 0)); err != nil {
+	if err := m.addEndpointRoute(endpoint, phys); err != nil {
 		if rerr := m.Revert(); rerr != nil {
 			logx.Errorf("[wgtun] revert during apply rollback: %v", rerr)
 		}
 		return err
 	}
 	return nil
+}
+
+// addEndpointRoute pins one endpoint onto the physical link so its packets do
+// not enter their own tunnel (which would be an instant routing loop).
+func (m *routeManager) addEndpointRoute(endpoint string, phys windows.MibIpForwardRow2) error {
+	epIP, epFamily, err := parseEndpointIP(endpoint)
+	if err != nil {
+		return err
+	}
+	epLen := uint8(32)
+	if epFamily == windows.AF_INET6 {
+		epLen = 128
+	}
+	return m.add(makeRoute(epSockaddr(epIP, epFamily), epLen, phys.NextHop, phys.InterfaceLuid, 0))
+}
+
+// addEndpointRouteFor pins an endpoint onto the physical link so its packets
+// do not enter their own tunnel (an instant routing loop). Failover calls it
+// for the CANDIDATE endpoint before re-handshaking: while both routes are
+// installed, a failed attempt cannot strand the session — the old endpoint
+// keeps its route until the new one has actually handshaken.
+func (m *routeManager) addEndpointRouteFor(endpoint string) error {
+	phys, err := defaultRoute(endpointFamily(endpoint))
+	if err != nil {
+		return fmt.Errorf("wgtun: no default route to pin %s on: %w", endpoint, err)
+	}
+	if err := m.addEndpointRoute(endpoint, phys); err != nil {
+		return err
+	}
+	logx.Infof("[wgtun] endpoint route added for %s", endpoint)
+	return nil
+}
+
+// dropEndpointRoute removes the host route of an endpoint that is no longer in
+// use (the previous endpoint after a successful failover, or a candidate whose
+// handshake failed).
+func (m *routeManager) dropEndpointRoute(endpoint string) error {
+	phys, err := defaultRoute(endpointFamily(endpoint))
+	row, rerr := m.endpointRow(endpoint, phys)
+	if rerr != nil {
+		return rerr
+	}
+	if err != nil {
+		// No physical default route for this family: the route cannot have been
+		// added either, so treat it as already gone.
+		return nil
+	}
+	if err := deleteIpForwardEntry2(&row); err != nil && !isNotFound(err) {
+		return fmt.Errorf("wgtun: removing endpoint route %s: %w", endpoint, err)
+	}
+	m.dropRecorded(row)
+	logx.Infof("[wgtun] endpoint route dropped for %s", endpoint)
+	return nil
+}
+
+// endpointRow rebuilds the host route row an endpoint would use, for deletion.
+func (m *routeManager) endpointRow(endpoint string, phys windows.MibIpForwardRow2) (windows.MibIpForwardRow2, error) {
+	epIP, epFamily, err := parseEndpointIP(endpoint)
+	if err != nil {
+		return windows.MibIpForwardRow2{}, err
+	}
+	epLen := uint8(32)
+	if epFamily == windows.AF_INET6 {
+		epLen = 128
+	}
+	return makeRoute(epSockaddr(epIP, epFamily), epLen, phys.NextHop, phys.InterfaceLuid, 0), nil
+}
+
+// dropRecorded forgets a deleted route in both the in-memory list (so Revert
+// does not try to delete it twice) and the crash-recovery state file.
+func (m *routeManager) dropRecorded(r windows.MibIpForwardRow2) {
+	target := routeRowOf(r)
+	kept := make([]windows.MibIpForwardRow2, 0, len(m.added))
+	for _, x := range m.added {
+		if !reflect.DeepEqual(routeRowOf(x), target) {
+			kept = append(kept, x)
+		}
+	}
+	m.added = kept
+
+	st, err := readStateFile()
+	if err != nil {
+		return // no state file: nothing persisted to forget
+	}
+	routes := make([]routeRowJSON, 0, len(st.Routes))
+	for _, rr := range st.Routes {
+		if !reflect.DeepEqual(rr, target) {
+			routes = append(routes, rr)
+		}
+	}
+	st.Routes = routes
+	if err := writeStateFile(st); err != nil {
+		logx.Warnf("[wgtun] state: forget route failed: %v", err)
+	}
+}
+
+// endpointFamily reports the address family of an endpoint without needing the
+// physical route first.
+func endpointFamily(endpoint string) uint16 {
+	_, family, err := parseEndpointIP(endpoint)
+	if err != nil {
+		return windows.AF_INET
+	}
+	return family
 }
 
 // applyHostRouteOnly installs the endpoint host route on the physical link
@@ -224,9 +327,11 @@ func (m *routeManager) Revert() error {
 // revertDeleteRoute / revertSetMetric are the syscall entry points Revert uses.
 // They are package-level variables so tests can substitute mocks and exercise
 // Revert offline (partial failure, idempotency) without touching real state.
+// revertGetMetric is the same kind of seam, for the link-metric guard.
 var (
 	revertDeleteRoute = deleteIpForwardEntry2
 	revertSetMetric   = setIpInterfaceEntry
+	revertGetMetric   = getIpInterfaceEntry
 )
 
 func (m *routeManager) revertRoutes() error {
@@ -449,6 +554,130 @@ func (m *routeManager) restoreInterfaceMetric() error {
 	return nil
 }
 
+// ---------------------------------------------------------------------------
+// Physical-link (WLAN/Ethernet) metric guard.
+//
+// Incident (2026-10-04): an interrupted probe left the WLAN adapter's metric
+// altered (UseAutomaticMetric disabled, InterfaceMetric=0), black-holing the
+// whole machine. The current architecture should not be able to do that — the
+// probe is stateless UDP with no adapter and no routeManager, and
+// setInterfaceMetric only ever runs on a wintun adapter — but that was an
+// argument, not a guarantee. This guard makes it one:
+//
+//   - snapshotLinkMetrics records the physical default-route adapter's
+//     per-family metric before anything is mutated;
+//   - a linkMetricGuard restores it on EVERY exit path of a connect (deferred
+//     by the caller), covering cancel, error and success;
+//   - the snapshot rides in the crash-recovery state file, so a hard kill is
+//     repaired by recoverFromState on the next launch.
+//
+// Restore is "only if different": an untouched adapter is never written to, so
+// the guard cannot stomp on a metric the user changed by hand.
+// ---------------------------------------------------------------------------
+
+// linkMetricJSON is the value projection of one physical adapter's per-family
+// metric (see metricStateJSON for why it is not ifMetricState).
+type linkMetricJSON struct {
+	LUID   uint64 `json:"luid"`
+	Family uint16 `json:"family"`
+	Metric uint32 `json:"metric"`
+	Auto   uint8  `json:"auto"`
+}
+
+// snapshotLinkMetrics captures the per-family metric of the physical adapter
+// that currently carries the default route, for both address families. A family
+// with no default route (or no interface entry) is skipped — there is nothing
+// to protect on it.
+func snapshotLinkMetrics() []linkMetricJSON {
+	var out []linkMetricJSON
+	seen := make(map[[2]uint64]bool)
+	for _, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
+		r, err := defaultRoute(family)
+		if err != nil {
+			continue
+		}
+		key := [2]uint64{r.InterfaceLuid, uint64(family)}
+		if seen[key] {
+			continue
+		}
+		var row windows.MibIpInterfaceRow
+		initializeIpInterfaceEntry(&row)
+		row.Family = family
+		row.InterfaceLuid = r.InterfaceLuid
+		if err := revertGetMetric(&row); err != nil {
+			continue
+		}
+		seen[key] = true
+		out = append(out, linkMetricJSON{
+			LUID:   r.InterfaceLuid,
+			Family: family,
+			Metric: row.Metric,
+			Auto:   row.UseAutomaticMetric,
+		})
+	}
+	return out
+}
+
+// linkMetricGuard is the in-process half of the guard: hold the snapshot and
+// restore it on every exit path the caller defers on.
+type linkMetricGuard struct {
+	saved []linkMetricJSON
+}
+
+func newLinkMetricGuard() *linkMetricGuard {
+	return &linkMetricGuard{saved: snapshotLinkMetrics()}
+}
+
+// restore puts back any physical-link metric that drifted away from the
+// snapshot. It never writes to an adapter whose metric still matches, so a
+// healthy link is untouched.
+func (g *linkMetricGuard) restore() error {
+	if g == nil {
+		return nil
+	}
+	return restoreLinkMetrics(g.saved)
+}
+
+// restoreLinkMetrics restores one snapshot. A missing adapter is the goal state
+// already reached (its metric row is gone with it), so it is not an error.
+func restoreLinkMetrics(entries []linkMetricJSON) error {
+	var errs []error
+	for _, e := range entries {
+		var cur windows.MibIpInterfaceRow
+		initializeIpInterfaceEntry(&cur)
+		cur.Family = e.Family
+		cur.InterfaceLuid = e.LUID
+		if err := revertGetMetric(&cur); err != nil {
+			if isNotFound(err) {
+				logx.Infof("[wgtun] link metric luid=%d family=%d already absent", e.LUID, e.Family)
+				continue
+			}
+			errs = append(errs, fmt.Errorf("read link metric family %d: %w", e.Family, err))
+			continue
+		}
+		if cur.Metric == e.Metric && cur.UseAutomaticMetric == e.Auto {
+			continue // untouched: never write on a healthy link
+		}
+		var set windows.MibIpInterfaceRow
+		initializeIpInterfaceEntry(&set)
+		set.Family = e.Family
+		set.InterfaceLuid = e.LUID
+		set.Metric = e.Metric
+		set.UseAutomaticMetric = e.Auto
+		if err := revertSetMetric(&set); err != nil {
+			logx.Errorf("[wgtun] link metric restore FAILED luid=%d family=%d: %v", e.LUID, e.Family, err)
+			errs = append(errs, fmt.Errorf("restore link metric family %d: %w", e.Family, err))
+			continue
+		}
+		// Log both sides: "drifted" is a real observation about what the
+		// takeover does to the physical link, and old->new is what makes it
+		// auditable instead of a mysterious write.
+		logx.Warnf("[wgtun] link metric drifted and was restored: luid=%d family=%d metric %d->%d auto %d->%d",
+			e.LUID, e.Family, cur.Metric, e.Metric, cur.UseAutomaticMetric, e.Auto)
+	}
+	return errors.Join(errs...)
+}
+
 // makeRoute builds a MibIpForwardRow2. Metric is the route-metric component
 // (0 = lowest); the adapter's interface metric is lowered separately by
 // setInterfaceMetric. Protocol 3 = MIB_IPPROTO_NETMGMT (a static route).
@@ -569,6 +798,12 @@ type wgtunState struct {
 	DNS     dnsStateJSON       `json:"dns"`
 	Routes  []routeRowJSON     `json:"routes"`
 
+	// LinkMetric is the physical (WLAN/Ethernet) default-route adapter's
+	// per-family metric, snapshotted before any mutation. It is restored by
+	// recoverFromState after a hard kill — the 2026-10-04 incident was exactly
+	// this metric left altered with no reverter.
+	LinkMetric []linkMetricJSON `json:"link_metric,omitempty"`
+
 	// Stacked marks a warp-in-warp (double tunnel) take-over. When set, recovery
 	// deletes the inner endpoint's /32 host route (recorded in InnerEp) before
 	// the normal route/metric/DNS restore, so the inner layer is torn down first.
@@ -648,7 +883,7 @@ func clearState() error {
 // setInterfaceMetric / applyDNS fill in later. Routes start empty and are added
 // by recordRoute.
 func (m *routeManager) writeState() error {
-	st := wgtunState{Version: stateFileVersion, LUID: m.luid}
+	st := wgtunState{Version: stateFileVersion, LUID: m.luid, LinkMetric: m.linkMetric}
 	if guid, err := convertInterfaceLuidToGuid(m.luid); err == nil {
 		st.GUID = guidString(guid)
 	}
@@ -688,15 +923,22 @@ func (m *routeManager) recordRoute(r windows.MibIpForwardRow2) error {
 	if err != nil {
 		return err
 	}
-	st.Routes = append(st.Routes, routeRowJSON{
+	st.Routes = append(st.Routes, routeRowOf(r))
+	return writeStateFile(st)
+}
+
+// routeRowOf projects a route row into its JSON form. It is used both to
+// persist an added route and to identify one for removal (failover moves the
+// endpoint route, so the state file must forget the old one).
+func routeRowOf(r windows.MibIpForwardRow2) routeRowJSON {
+	return routeRowJSON{
 		InterfaceLuid: r.InterfaceLuid,
 		DestFamily:    r.DestinationPrefix.Prefix.Family,
 		DestAddr:      sockaddrAddr(r.DestinationPrefix.Prefix),
 		DestPrefixLen: r.DestinationPrefix.PrefixLength,
 		NextHopFamily: r.NextHop.Family,
 		NextHopAddr:   sockaddrAddr(r.NextHop),
-	})
-	return writeStateFile(st)
+	}
 }
 
 // isNotFound reports whether err means "the thing we tried to touch no longer
@@ -808,6 +1050,14 @@ func recoverFromState() error {
 			}
 			errs = append(errs, fmt.Errorf("restore metric family %d: %w", family, err))
 		}
+	}
+
+	// 1b. Restore the PHYSICAL link's metric (the wintun adapter's own metric is
+	// step 1). This is the guard for the 2026-10-04 incident, where an
+	// interrupted probe left the WLAN adapter's metric altered and black-holed
+	// the whole machine. Entries whose metric still matches are never written to.
+	if err := restoreLinkMetrics(st.LinkMetric); err != nil {
+		errs = append(errs, err)
 	}
 
 	// 2. Restore (or remove) DNS.

@@ -32,7 +32,7 @@ import (
 // segment is wgcf's current one (v0a5641); warpscout uses v0a4005, but that
 // older path is not what pins the protocol — the tunnel_type field is.
 const (
-	regBaseURL  = "https://api.cloudflareclient.com/v0a5641/reg"
+	regBaseURL  = "https://api.cloudflareclient.com/v0a3371/reg"
 	cfUserAgent = "okhttp/3.12.1"
 )
 
@@ -105,21 +105,19 @@ func RegisterAccount(client *http.Client, baseURL string) (*WarpAccount, error) 
 		return nil, err
 	}
 
-	// wgcf's request body: tunnel_type=wireguard + key_type=curve25519 pin the
-	// account to the WireGuard protocol at registration time. Omitting them made
-	// Cloudflare default the account to MASQUE (policy.tunnel_protocol="masque"),
-	// whose handshake is rejected — the exact failure seen before.
+	// Mirror the reference client's (E:\warp) registration body: `type=Android`,
+	// with no tunnel_type / key_type. That project registers this way and its
+	// single-layer WireGuard config connects; the wgcf-style body
+	// (tunnel_type=wireguard + key_type=curve25519) is what the native tunnel
+	// could not complete a handshake with.
 	reqBody, _ := json.Marshal(map[string]string{
-		"key":           pub,
-		"install_id":    "",
-		"fcm_token":     "",
-		"tos":           time.Now().Format(time.RFC3339Nano),
-		"model":         "PC",
-		"serial_number": "",
-		"os_version":    "16.0.0",
-		"locale":        "en_US",
-		"key_type":      "curve25519",
-		"tunnel_type":   "wireguard",
+		"key":        pub,
+		"install_id": "",
+		"fcm_token":  "",
+		"tos":        time.Now().Format(time.RFC3339Nano),
+		"model":      "PC",
+		"type":       "Android",
+		"locale":     "zh_CN",
 	})
 
 	req, err := http.NewRequest(http.MethodPost, baseURL, bytes.NewReader(reqBody))
@@ -178,10 +176,10 @@ func RegisterAccount(client *http.Client, baseURL string) (*WarpAccount, error) 
 		logx.Warnf("[wgtun] register: no client_id in response; reserved stays zero")
 	}
 
-	// No PATCH is needed: wgcf pins the protocol in the register request body
-	// (tunnel_type=wireguard), and a warp_enabled PATCH is rejected by Cloudflare
-	// ("Invalid registration request") — the account is WARP-enabled on creation.
-	// Just surface the protocol so the caller can confirm it is wireguard.
+	// No PATCH is needed: the account is WARP-enabled on creation, and a
+	// warp_enabled PATCH is rejected by Cloudflare ("Invalid registration
+	// request"). Just surface the protocol so the caller can see what
+	// Cloudflare assigned.
 	if r.TunnelType != "" && r.TunnelType != "wireguard" {
 		logx.Warnf("[wgtun] register: tunnel_type=%q (want wireguard); WireGuard handshake may be rejected", r.TunnelType)
 	}

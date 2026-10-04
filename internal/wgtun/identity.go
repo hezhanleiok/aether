@@ -4,13 +4,14 @@ package wgtun
 
 import (
 	"bufio"
-	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/aethergui/aethergui/internal/logx"
 )
 
 // LoadIdentity reads the WARP identity that the Aether core has already
@@ -30,6 +31,12 @@ func LoadIdentity(configDir, endpointOverride string) (Config, error) {
 		cfg, err := loadOverrideConf(overridePath)
 		if err != nil {
 			return Config{}, fmt.Errorf("wgtun: wgtun-override.conf: %w", err)
+		}
+		// The endpoint override still wins: an A/B run must be able to pin one
+		// endpoint while taking the identity (and junk params) from the file,
+		// otherwise the endpoint is a second variable.
+		if ep := strings.TrimSpace(endpointOverride); ep != "" {
+			cfg.Endpoint = ep
 		}
 		return cfg, nil
 	}
@@ -51,13 +58,6 @@ func LoadIdentity(configDir, endpointOverride string) (Config, error) {
 		return Config{}, fmt.Errorf("wgtun: aether.toml is missing wg_private_key / wg_peer_public_key / ipv4")
 	}
 
-	reserved, err := decodeReservedBytes(kv["client_id"])
-	if err != nil {
-		return Config{}, fmt.Errorf("wgtun: client_id: %w", err)
-	}
-	cfg.Reserved = reserved
-	cfg.HasReserved = true
-
 	ep := strings.TrimSpace(endpointOverride)
 	if ep == "" {
 		if assigned := kv["assigned_endpoint"]; assigned != "" {
@@ -69,6 +69,13 @@ func LoadIdentity(configDir, endpointOverride string) (Config, error) {
 	}
 	cfg.Endpoint = ep
 	return cfg, nil
+}
+
+// LoadConfFile parses a WireGuard/AWG .conf into a Config. It exists so tools
+// (cmd/wgbench) can load a config from an arbitrary path — the A/B runs must
+// pin an identity without disturbing the app's own override slot.
+func LoadConfFile(path string) (Config, error) {
+	return loadOverrideConf(path)
 }
 
 // loadOverrideConf parses a WireGuard .conf (INI) into a Config. It supports the
@@ -129,37 +136,52 @@ func loadOverrideConf(path string) (Config, error) {
 		return Config{}, fmt.Errorf("missing Endpoint")
 	}
 
-	// Reserved (optional): three comma-separated decimal bytes.
-	if s := strings.TrimSpace(kv["Reserved"]); s != "" {
-		parts := strings.Split(s, ",")
-		if len(parts) != 3 {
-			return Config{}, fmt.Errorf("Reserved must be 3 comma-separated bytes, got %q", s)
+	// A Reserved line, if present, is intentionally ignored: the WARP client_id
+	// is NOT sent in the handshake (see the reserved-bytes note in wgtun.go).
+
+	// AmneziaWG junk decoys. Absent (or Jc=0) means plain WireGuard — the
+	// baseline for the anti-DPI A/B.
+	cfg.JunkCount = iniInt(kv, "Jc")
+	cfg.JunkMinSize = iniInt(kv, "Jmin")
+	cfg.JunkMaxSize = iniInt(kv, "Jmax")
+	if cfg.JunkCount > 0 && (cfg.JunkMinSize <= 0 || cfg.JunkMaxSize <= 0) {
+		return Config{}, fmt.Errorf("Jc=%d but Jmin/Jmax missing or non-positive", cfg.JunkCount)
+	}
+
+	// I1..I5 (the fixed "special junk" templates, e.g. a canned QUIC Initial)
+	// are NOT implemented yet: the minimal set is Jc/Jmin/Jmax only. Say so
+	// loudly instead of silently dropping them — the A/B result is meaningless
+	// if you think I1 was applied when it was not.
+	for _, k := range []string{"I1", "I2", "I3", "I4", "I5", "J1", "J2", "J3"} {
+		if iniRaw(kv, k) != "" {
+			logx.Warnf("[wgtun] %s in override conf: special/controlled junk is NOT implemented yet; ignored", k)
 		}
-		for i, p := range parts {
-			n, err := strconv.ParseUint(strings.TrimSpace(p), 10, 8)
-			if err != nil {
-				return Config{}, fmt.Errorf("Reserved[%d]: %w", i, err)
-			}
-			cfg.Reserved[i] = byte(n)
-		}
-		cfg.HasReserved = true
 	}
 	return cfg, nil
 }
 
-// decodeReservedBytes turns Aether's base64 client_id (three bytes) into the
-// reserved triple the WARP handshake needs.
-func decodeReservedBytes(clientID string) ([3]byte, error) {
-	var out [3]byte
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(clientID))
+// iniInt reads one case-insensitive integer key out of an INI-style map
+// (Amnezia writes "Jc", wgcf writes "MTU", casing varies by exporter).
+func iniInt(kv map[string]string, key string) int {
+	v := iniRaw(kv, key)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
 	if err != nil {
-		return out, err
+		return 0
 	}
-	if len(raw) != 3 {
-		return out, fmt.Errorf("client_id decodes to %d bytes, want 3", len(raw))
+	return n
+}
+
+// iniRaw returns the value of key, matched case-insensitively.
+func iniRaw(kv map[string]string, key string) string {
+	for k, v := range kv {
+		if strings.EqualFold(k, key) {
+			return strings.TrimSpace(v)
+		}
 	}
-	copy(out[:], raw)
-	return out, nil
+	return ""
 }
 
 // readFlatToml parses the flat `key = "value"` lines Aether writes. It is

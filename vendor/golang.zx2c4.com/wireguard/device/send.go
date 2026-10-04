@@ -127,6 +127,25 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	_ = msg.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
 
+	// AmneziaWG junk decoys (Xiaohe patch): send the random packets BEFORE the
+	// initiation, out of the same socket, so the flow no longer opens with a
+	// bare 148-byte WireGuard initiation. The initiation itself is untouched —
+	// a standard WireGuard peer (WARP) drops the decoys and completes the
+	// handshake exactly as it would without them. A junk failure is logged and
+	// ignored: it must never prevent the real handshake from going out.
+	if peer.device.junk.enabled() {
+		junks, err := peer.device.junk.create()
+		if err != nil {
+			peer.device.log.Errorf("%v - Failed to create junk packets: %v", peer, err)
+		} else if len(junks) > 0 {
+			if err := peer.SendBuffers(junks); err != nil {
+				peer.device.log.Errorf("%v - Failed to send junk packets: %v", peer, err)
+			} else {
+				peer.device.log.Verbosef("%v - Sent %d junk packets before handshake initiation", peer, len(junks))
+			}
+		}
+	}
+
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 

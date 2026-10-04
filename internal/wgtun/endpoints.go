@@ -3,45 +3,70 @@
 package wgtun
 
 import (
-	"net/netip"
+	"context"
+	"fmt"
+	"net"
+	"sort"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/aethergui/aethergui/internal/logx"
 )
 
-// warpPoolsV4 is the Cloudflare WARP IPv4 endpoint pool, taken from warpscout's
-// pools.go. WARP endpoints live in these /24 ranges; the native tunnel probes a
-// sample of hosts across them so a single dead endpoint never blocks the whole
-// connect.
-var warpPoolsV4 = []string{
-	"8.6.112.0/24",
-	"8.34.70.0/24",
-	"8.34.146.0/24",
-	"8.35.211.0/24",
-	"8.39.125.0/24",
-	"8.39.204.0/24",
-	"8.39.214.0/24",
-	"8.47.69.0/24",
-	"162.159.192.0/24",
-	"162.159.195.0/24",
-	"188.114.96.0/24",
-	"188.114.97.0/24",
-	"188.114.98.0/24",
-	"188.114.99.0/24",
+// cfIPv4Prefixes are the WARP /24 prefixes the reference scanner (E:\warp) probes
+// with full /24 coverage and which it has proven live on this host (96 Mbps
+// connects). It deliberately omits the 8.x segments that warpscout's pools.go
+// listed — those drifted out of the live WARP pool, while 162.159.x / 188.114.x
+// still carry the endpoints that both the Aether core and the reference scanner
+// connect through.
+var cfIPv4Prefixes = []string{
+	"162.159.192", "162.159.193", "162.159.195",
+	"188.114.96", "188.114.97", "188.114.98", "188.114.99",
 }
 
-// warpPorts are the UDP ports WARP endpoints listen on, ordered by priority.
-// 4500 (IKE) is first: most networks/NATs whitelist it, so a host:4500 handshake
-// succeeds far more often than the default 2408. 2408 is WARP's default; 500 and
-// 1701 (IKE/L2TP) are fallbacks.
-var warpPorts = []int{4500, 2408, 500, 1701}
+// warpPorts is the set of official WARP UDP ports (same 54-port set as the
+// reference's all54OfficialPorts). It is the pool used for host%54 sampling: each
+// /24's 254 hosts get a spread of all 54 ports instead of a single fixed port.
+// Ordering only matters for the seed/cache-priority tail; the live probe walks
+// the full pool via the UDP liveness pre-probe, not serially.
+var warpPorts = []int{
+	4500, 2408, 500, 1701, // original 4, priority order preserved
+	// remaining official ports (same set as reference all54OfficialPorts):
+	854, 859, 864, 878, 880, 890, 891, 894, 903, 908, 928, 934, 939, 942,
+	943, 945, 946, 955, 968, 987, 988, 1002, 1010, 1014, 1018, 1070, 1074,
+	1180, 1387, 1843, 2371, 2506, 3138, 3476, 3581, 3854, 4177, 4198, 4233,
+	5279, 5956, 7103, 7152, 7156, 7281, 7559, 8319, 8742, 8854, 8886,
+}
 
-// probeHosts are the host octets sampled from each /24 pool. .7/.8 are commonly
-// populated WARP endpoints (and .7 is what the override .conf used).
-var probeHosts = []byte{7, 8}
+// cfProbePacket is Cloudflare WARP's stateless endpoint liveness probe (64
+// bytes). A live WARP endpoint answers it with a 5-byte marker
+// (0xcf 00 00 00 00) regardless of account/key, so it separates live endpoints
+// from dead/drifted ones without a WireGuard device, key, or reserved bytes.
+var cfProbePacket = []byte{
+	0x04, 0x67, 0x27, 0x31, 0x72, 0x3f, 0x14, 0x62, 0xbc, 0xf5, 0xb7, 0x28, 0xae, 0xca, 0x31, 0x13,
+	0x63, 0xf8, 0xd0, 0xc3, 0x49, 0x97, 0x4a, 0x6c, 0x70, 0x48, 0x11, 0xbe, 0x99, 0x70, 0x19, 0x1d,
+	0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xb6, 0xed, 0x1b,
+	0xed, 0x21, 0x65, 0x69, 0x02, 0xb9, 0xd8, 0xf3, 0xc2, 0xbd, 0x7d, 0x98, 0xda,
+}
 
-// buildCandidates returns the ordered endpoint candidate list for a connect.
-// The seed (the .conf / pinned endpoint) is always first; then, per port in
-// priority order, every pooled /24 contributes its sample hosts. Probing is
-// "first handshake wins", so the ordering matters: 4500 is exhausted before 2408
-// is tried.
+// liveEndpoint is an endpoint that passed the strict UDP liveness probe. Speed is
+// the RTT-derived estimate used only to order the handshake sweep (fastest
+// first); the real throughput is measured later once the tunnel is up.
+type liveEndpoint struct {
+	Addr    string
+	Latency int64
+	Speed   float64
+}
+
+// buildCandidates returns the ordered endpoint candidate list for a connect: the
+// seed (.conf pinned endpoint) first, then the cached endpoints (fastest first),
+// then the full WARP pool — every host of every /24 prefix, each host mapped to
+// one of the 54 ports by host%54 (the reference scanner's strategy). Probing is
+// "first handshake wins", but the live probe screens this whole pool with a cheap
+// concurrent UDP liveness pre-probe before any handshake, so the serial cost of
+// enumerating ~2032 candidates is borne by stateless UDP, not by handshakes.
 func buildCandidates(seed string) []string {
 	seen := make(map[string]bool)
 	var out []string
@@ -58,21 +83,275 @@ func buildCandidates(seed string) []string {
 	}
 
 	// Cached endpoints (fastest first) jump ahead of the cold pool probe. They
-	// are still handshake-verified by probeEndpoint — this only sets priority.
+	// are still handshake-verified — this only sets priority.
 	for _, ep := range loadCache().orderedAddrs() {
 		add(ep)
 	}
 
-	for _, port := range warpPorts {
-		for _, p := range warpPoolsV4 {
-			prefix := netip.MustParsePrefix(p)
-			base := prefix.Addr().As4()
-			for _, host := range probeHosts {
-				base[3] = host
-				ap := netip.AddrPortFrom(netip.AddrFrom4(base), uint16(port))
-				add(ap.String())
-			}
+	portCount := len(warpPorts)
+	for _, prefix := range cfIPv4Prefixes {
+		for host := 1; host <= 254; host++ {
+			port := warpPorts[host%portCount]
+			add(fmt.Sprintf("%s.%d:%d", prefix, host, port))
 		}
 	}
 	return out
+}
+
+// udpProbeTimeout is the per-round deadline for a single UDP liveness probe. A
+// dead endpoint fails the first round and returns immediately; a live endpoint
+// answers in ~100-200ms, so three rounds complete well under this.
+const udpProbeTimeout = 800 * time.Millisecond
+
+// probeEndpointStrict runs the strict 3-round, 0-loss liveness probe against one
+// endpoint. It returns the average RTT (ms), an RTT-derived speed estimate, and
+// ok=true only if all three rounds got the 0xcf marker back. This is the same
+// gate the reference scanner uses: a single dropped probe round rejects the
+// endpoint, which filters out the "fake-live" endpoints a handshake would waste
+// its timeout on.
+func probeEndpointStrict(addr string, timeout time.Duration) (int64, float64, bool) {
+	ua, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return 0, 0, false
+	}
+	conn, err := net.DialUDP("udp", nil, ua)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer conn.Close()
+
+	const rounds = 3
+	var total, min, max int64
+	min = 9999
+	for i := 0; i < rounds; i++ {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+		start := time.Now()
+		if _, err := conn.Write(cfProbePacket); err != nil {
+			return 0, 0, false
+		}
+		buf := make([]byte, 256)
+		n, err := conn.Read(buf)
+		if err != nil || n < 5 || buf[0] != 0xcf || buf[1] != 0 || buf[2] != 0 || buf[3] != 0 || buf[4] != 0 {
+			return 0, 0, false
+		}
+		rtt := time.Since(start).Milliseconds()
+		if rtt == 0 {
+			rtt = 1
+		}
+		total += rtt
+		if rtt < min {
+			min = rtt
+		}
+		if rtt > max {
+			max = rtt
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	avg := total / rounds
+	jitter := max - min
+	speed := (1000.0/float64(avg))*14.8 - float64(jitter)*0.35
+	if speed < 15.0 {
+		speed = 18.0 + float64(time.Now().UnixNano()%10)
+	}
+	if speed > 180.0 {
+		speed = 180.0
+	}
+	return avg, speed, true
+}
+
+// udpProbeWorkers bounds the concurrent UDP liveness probes. 24 workers sweep a
+// ~2032-endpoint pool in well under a minute because each probe is a single
+// stateless round-trip (a dead endpoint costs one 800ms timeout, not a full
+// handshake). It was lowered from 50: 50 concurrent 3-round UDP probes produced
+// a burst heavy enough to trip consumer router/ISP UDP rate-limiting and drop
+// the user's whole link mid-connect (observed 2026-10-04), while 24 keeps the
+// sweep fast enough to beat WARP endpoint drift without saturating the link.
+const udpProbeWorkers = 24
+
+// failoverPorts are the ports tried against the SAME host when an endpoint
+// dies. Port matters as much as host: observed 2026-10-04, one host was stable
+// for 24 minutes at 250 Mbps on :2408 while its neighbours on :500 died within
+// a minute. 2408 first (the observed-stable one), then 500, then the two
+// remaining "classic" WARP ports.
+var failoverPorts = []int{2408, 500, 4500, 1701}
+
+// portVariants returns the same host on the failover ports, dropping the
+// current address and anything in avoid. It is the cheapest failover move: same
+// IP, different port, no new host to find.
+func portVariants(current string, avoid map[string]bool) []string {
+	host, _, err := net.SplitHostPort(current)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(failoverPorts))
+	for _, p := range failoverPorts {
+		addr := net.JoinHostPort(host, strconv.Itoa(p))
+		if addr == current || avoid[addr] {
+			continue
+		}
+		out = append(out, addr)
+	}
+	return out
+}
+
+// failoverCandidates builds the ordered list of endpoints to try when the
+// current one dies. Cheapest and most likely first:
+//
+//  1. the same host on the other failover ports (the host is known reachable,
+//     only its port got blocked);
+//  2. cached endpoints, fastest first (proven on this machine);
+//  3. a spread sample of the cold pool, so a failover never has to wait for a
+//     full sweep.
+//
+// It never returns current, and skip lists everything already tried this cycle.
+func failoverCandidates(current string, skip map[string]bool, limit int) []string {
+	seen := map[string]bool{current: true}
+	for k := range skip {
+		seen[k] = true
+	}
+	var out []string
+	add := func(ep string) {
+		if ep == "" || seen[ep] || (limit > 0 && len(out) >= limit) {
+			return
+		}
+		seen[ep] = true
+		out = append(out, ep)
+	}
+
+	for _, ep := range portVariants(current, seen) {
+		add(ep)
+	}
+	for _, ep := range loadCache().orderedAddrs() {
+		add(ep)
+	}
+	if limit > 0 && len(out) >= limit {
+		return out
+	}
+	// Stride-sample the pool so the sample spans every /24 instead of the first
+	// prefix only.
+	pool := buildCandidates("")
+	if len(pool) == 0 {
+		return out
+	}
+	stride := len(pool) / (limit + 1)
+	if stride < 1 {
+		stride = 1
+	}
+	for i := 0; i < len(pool) && (limit <= 0 || len(out) < limit); i += stride {
+		add(pool[i])
+	}
+	return out
+}
+
+// handshakeTimeout is the per-endpoint handshake deadline on the real tunnel.
+// 14s matches the reference scanner: WireGuard's first initiation can be
+// dropped, and the peer only answers the retry at RekeyTimeout=5s; 6s was
+// observed to kill good endpoints before that retry fired (30/30 loss on a
+// high-loss network) — but 6s is still used for cached/seed candidates on
+// purpose, where failing fast is worth more than a marginal hit rate, because
+// a stale cache entry should hand over to the sweep as soon as possible.
+const handshakeTimeout = 14 * time.Second
+
+// maxHandshakeCandidates caps how many endpoints are tried per connect. The
+// reference verifies its top 12; more is diminishing returns because a connect
+// that found 20+ live endpoints almost always handshakes within the top
+// handful.
+const maxHandshakeCandidates = 12
+
+// cachedCandidates returns the seed plus cached endpoints, fastest-cache-first:
+// endpoints that proved good on a previous run are tried before anything else,
+// so a normal reconnect never emits the full-pool UDP sweep (whose burst
+// rate-limited the user's whole link on 2026-10-04).
+func cachedCandidates(seed, exclude string) []liveEndpoint {
+	seen := make(map[string]bool)
+	var out []liveEndpoint
+	for _, ep := range append([]string{seed}, loadCache().orderedAddrs()...) {
+		if ep == "" || seen[ep] || (exclude != "" && ep == exclude) {
+			continue
+		}
+		seen[ep] = true
+		out = append(out, liveEndpoint{Addr: ep})
+	}
+	return out
+}
+
+// probeCandidates ranks endpoints WITHOUT handshaking: cached/seed endpoints
+// first (fast path, zero UDP burst), and only when the caller reports those all
+// failed does it fall back to the strict full-pool UDP liveness sweep.
+// Handshaking is left to the real tunnel (single WireGuard device, hot-switched
+// endpoints): running several throwaway devices concurrently was observed to
+// complete handshakes the real tunnel then could not reproduce.
+func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep bool, onPhase func(string)) ([]liveEndpoint, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !useSweep {
+		quick := cachedCandidates(cfg.Endpoint, exclude)
+		if len(quick) > 0 {
+			logx.Infof("[wgtun] fast path: trying %d cached/seed endpoints first", len(quick))
+			return quick, nil
+		}
+	}
+	candidates := buildCandidates(cfg.Endpoint)
+	if exclude != "" {
+		candidates = excludeEndpoint(candidates, exclude)
+	}
+	live := filterLiveStrict(ctx, candidates, onPhase)
+	if len(live) == 0 {
+		return nil, fmt.Errorf("no endpoint answered the liveness probe (checked %d candidates)", len(candidates))
+	}
+	logx.Infof("[wgtun] %d/%d endpoints answered the liveness probe", len(live), len(candidates))
+	if len(live) > maxHandshakeCandidates {
+		live = live[:maxHandshakeCandidates]
+	}
+	return live, nil
+}
+
+// filterLiveStrict screens the candidate pool with the strict UDP liveness probe,
+// returning the surviving endpoints sorted by speed estimate descending (fastest
+// first). It is concurrent (bounded by a semaphore) and checks ctx at the
+// enqueue boundary, so a cancelled connect stops scheduling and returns whatever
+// is already known. onPhase, when non-nil, receives throttled progress labels.
+func filterLiveStrict(ctx context.Context, candidates []string, onPhase func(string)) []liveEndpoint {
+	if len(candidates) == 0 {
+		return nil
+	}
+	sem := make(chan struct{}, udpProbeWorkers)
+	results := make([]liveEndpoint, 0, len(candidates)/10)
+	var mu sync.Mutex
+	var done int64
+	total := int64(len(candidates))
+	var wg sync.WaitGroup
+
+	for _, ep := range candidates {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(ep string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			lat, speed, ok := probeEndpointStrict(ep, udpProbeTimeout)
+			if ok {
+				mu.Lock()
+				results = append(results, liveEndpoint{Addr: ep, Latency: lat, Speed: speed})
+				mu.Unlock()
+			}
+			n := atomic.AddInt64(&done, 1)
+			if onPhase != nil && (n == 1 || n == total || n%200 == 0) {
+				onPhase(fmt.Sprintf("scan %d/%d", n, total))
+			}
+		}(ep)
+	}
+	wg.Wait()
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Speed == results[j].Speed {
+			return results[i].Latency < results[j].Latency
+		}
+		return results[i].Speed > results[j].Speed
+	})
+	return results
 }

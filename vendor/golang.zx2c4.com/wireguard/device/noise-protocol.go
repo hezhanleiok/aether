@@ -287,10 +287,7 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
 	handshake.mixHash(handshake.remoteStatic[:])
 
 	msg := MessageInitiation{
-		// The three bytes after the message type carry WARP's client
-		// identifier (device.reserved); standard WireGuard leaves them zero.
-		// (Xiaohe WARP patch.)
-		Type:      MessageInitiationType | uint32(device.reserved[0])<<8 | uint32(device.reserved[1])<<16 | uint32(device.reserved[2])<<24,
+		Type:      MessageInitiationType,
 		Ephemeral: handshake.localEphemeral.publicKey(),
 	}
 

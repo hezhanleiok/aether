@@ -27,6 +27,10 @@ var (
 	procInitializeIpInterfaceEntry  = modIPHlpAPI.NewProc("InitializeIpInterfaceEntry")
 	procFreeMibTable                = modIPHlpAPI.NewProc("FreeMibTable")
 	procDnsFlushResolverCache       = modDNSAPI.NewProc("DnsFlushResolverCache")
+
+	procInitializeUnicastIpAddressEntry = modIPHlpAPI.NewProc("InitializeUnicastIpAddressEntry")
+	procCreateUnicastIpAddressEntry     = modIPHlpAPI.NewProc("CreateUnicastIpAddressEntry")
+	procDeleteUnicastIpAddressEntry     = modIPHlpAPI.NewProc("DeleteUnicastIpAddressEntry")
 )
 
 // convertInterfaceLuidToIndex maps a NET_LUID to its interface index.
@@ -104,4 +108,33 @@ func freeMibTable(ptr unsafe.Pointer) {
 func flushResolverCache() bool {
 	r1, _, _ := procDnsFlushResolverCache.Call()
 	return r1 != 0
+}
+
+// initializeUnicastIpAddressEntry zeroes the row and sets defaults; it must be
+// called before filling CreateUnicastIpAddressEntry's row.
+func initializeUnicastIpAddressEntry(row *windows.MibUnicastIpAddressRow) {
+	procInitializeUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(row)))
+}
+
+// createUnicastIpAddressEntry assigns one unicast address to an interface.
+// This is how the wintun adapter gets its tunnel address: without it the
+// adapter has no source address, packets leave with a wrong source and
+// Cloudflare WARP drops them — the handshake still succeeds (control plane
+// never sees the inner source IP) but the data plane is dead, which is exactly
+// the "connected, then the whole link black-holed" signature.
+func createUnicastIpAddressEntry(row *windows.MibUnicastIpAddressRow) error {
+	r1, _, _ := procCreateUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(row)))
+	if r1 != 0 {
+		return syscall.Errno(r1)
+	}
+	return nil
+}
+
+// deleteUnicastIpAddressEntry removes one unicast address assignment.
+func deleteUnicastIpAddressEntry(row *windows.MibUnicastIpAddressRow) error {
+	r1, _, _ := procDeleteUnicastIpAddressEntry.Call(uintptr(unsafe.Pointer(row)))
+	if r1 != 0 {
+		return syscall.Errno(r1)
+	}
+	return nil
 }

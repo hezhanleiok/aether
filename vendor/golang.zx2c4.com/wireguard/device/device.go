@@ -18,17 +18,6 @@ import (
 )
 
 type Device struct {
-	// reserved holds the three bytes that follow the message type in the
-	// handshake initiation. Standard WireGuard leaves them zero; Cloudflare
-	// WARP uses them as a client identifier.
-	//
-	// RACE CONSTRAINT (Xiaohe WARP patch): this field is intentionally
-	// lock-free and MUST be written exactly once via SetReserved, BEFORE the
-	// device is brought Up and the first handshake fires. Once Up, the
-	// handshake goroutine reads it concurrently with no lock - do not write it
-	// from anywhere else or after Up.
-	reserved [3]byte
-
 	state struct {
 		// state holds the device's state. It is accessed atomically.
 		// Use the device.deviceState method to read it.
@@ -77,6 +66,17 @@ type Device struct {
 	allowedips    AllowedIPs
 	indexTable    IndexTable
 	cookieChecker CookieChecker
+
+	// junk holds the AmneziaWG anti-DPI decoy configuration (Xiaohe patch, see
+	// awgjunk.go). It only ever adds packets BEFORE a handshake and never
+	// changes a handshake byte, so it is inert unless configured.
+	junk awgJunk
+
+	// junkPending accumulates the junk keys of the UAPI operation currently
+	// being applied, so all three can be validated together once the whole
+	// config is known (key order in the stream must not matter). Guarded by
+	// ipcMutex.
+	junkPending awgJunkParams
 
 	pool struct {
 		inboundElementsContainer  *WaitPool
@@ -290,18 +290,6 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 	}
 
 	return nil
-}
-
-// SetReserved sets the three reserved bytes written after the message type in
-// every handshake initiation. Cloudflare WARP uses them as a client identifier
-// and rejects initiations whose reserved bytes are zero.
-//
-// MUST be called exactly once, before Up() and the first handshake. The field
-// is lock-free and is read by the handshake goroutine once the device is Up,
-// so calling this after Up() (or from another goroutine) is a data race that
-// will corrupt the handshake. (Xiaohe WARP patch.)
-func (device *Device) SetReserved(reserved [3]byte) {
-	device.reserved = reserved
 }
 
 func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {

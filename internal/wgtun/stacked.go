@@ -46,6 +46,11 @@ type StackedTunnel struct {
 	// innerEpRow is the inner endpoint's /32 on-link route onto the OUTER
 	// adapter — the one route that couples the two layers (see notes).
 	innerEpRow windows.MibIpForwardRow2
+
+	// link is the physical-link metric guard, restored by Down (like
+	// Manager.Stop): drift can happen while the stack is up, after
+	// NewStackedTunnel has returned.
+	link *linkMetricGuard
 }
 
 // NewStackedTunnel brings up the outer tunnel first, then the inner tunnel whose
@@ -69,9 +74,42 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 		innerCfg.InterfaceName = "Xiaohe-inner"
 	}
 
-	s := &StackedTunnel{}
+	// Physical-link metric guard, same as Manager.Start: snapshot the default-
+	// route adapter's per-family metric and restore it on every exit path, so an
+	// interrupted stacked connect can never leave the WLAN metric altered.
+	link := newLinkMetricGuard()
+	defer func() {
+		if err := link.restore(); err != nil {
+			logx.Errorf("[wgtun] link metric guard: %v", err)
+		}
+	}()
 
-	// ---- outer layer: the ordinary single-tunnel flow ----
+	s := &StackedTunnel{link: link}
+
+	// ---- outer layer: one real adapter, endpoint hot-switched across candidates ----
+	// Same architecture as Manager.Start (see the note there): the candidate
+	// list comes first (cached/seed, no UDP burst), the wintun adapter is
+	// created once, and the peer endpoint is hot-switched via UAPI. Concurrent
+	// dummy-device handshakes are NOT used here either — they completed
+	// handshakes the real tunnel could not reproduce, and their devices
+	// competed with it for the same UDP 5-tuple/Cloudflare session.
+	//
+	// The OUTER layer only pins its endpoint onto the physical link. It must NOT
+	// lower its metric, install a default route, or set DNS — otherwise its
+	// default route would compete with the inner layer's. The inner endpoint's
+	// /32 route (added below) is the only thing the outer adapter carries.
+	//
+	// The inner endpoint MUST be excluded from the outer pool: if both layers
+	// land on the same UDP 5-tuple, every packet the inner layer sends to its
+	// endpoint is captured by the outer /32 host route and loops inside the
+	// outer tunnel (observed as mass "Failed to send data packets: short
+	// buffer" on the outer peer and an inner handshake that never completes).
+	cands, err := probeCandidates(ctx, outerCfg, innerCfg.Endpoint, false, phase)
+	if err != nil {
+		return nil, fmt.Errorf("wgtun: outer candidates: %w", err)
+	}
+	outerCfg.Endpoint = cands[0].Addr
+
 	outer, err := New(outerCfg)
 	if err != nil {
 		return nil, fmt.Errorf("wgtun: outer tunnel: %w", err)
@@ -81,32 +119,28 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 		return nil, fmt.Errorf("wgtun: outer up: %w", err)
 	}
 	s.outer = outer
+	phase("outer-handshake")
 
-	outerRM := newRouteManager(outer.luid(), outerCfg.DNS)
-	// The OUTER layer only pins its endpoint onto the physical link. It must NOT
-	// lower its metric, install a default route, or set DNS — otherwise its
-	// default route would compete with the inner layer's. The inner endpoint's
-	// /32 route (added below) is the only thing the outer adapter carries.
-	//
-	// Probe the FULL candidate pool first (not just the cached-fastest
-	// endpoint): ISP-level UDP reachability to Cloudflare endpoints shifts
-	// within hours, and the single-endpoint attempt was the stacked outer
-	// handshake failure. The host route is pinned only after the winning
-	// endpoint is known, so it always matches the live one.
-	//
-	// The inner endpoint MUST be excluded from the outer pool: if both layers
-	// land on the same UDP 5-tuple, every packet the inner layer sends to its
-	// endpoint is captured by the outer /32 host route and loops inside the
-	// outer tunnel (observed as mass "Failed to send data packets: short
-	// buffer" on the outer peer and an inner handshake that never completes).
-	connectedOuter, err := probeEndpoints(ctx, outer,
-		excludeEndpoint(buildCandidates(outerCfg.Endpoint), innerCfg.Endpoint), phase)
+	// HARD GATE: the outer layer must complete its own handshake before the
+	// inner endpoint's /32 route is pinned onto it — pinning onto a dead outer
+	// tunnel black-holes the inner handshake. If every cached/seed candidate
+	// fails, widen to the full-pool UDP sweep (known-live only) and retry those
+	// on the same adapter.
+	connectedOuter, err := handshakeAcross(outer, cands, handshakeTimeout)
+	if err != nil && ctx.Err() == nil {
+		logx.Infof("[wgtun] stacked: cached/seed outer candidates all failed (%v); running full sweep", err)
+		swept, serr := probeCandidates(ctx, outerCfg, innerCfg.Endpoint, true, phase)
+		if serr == nil {
+			connectedOuter, err = handshakeAcross(outer, swept, handshakeTimeout)
+		}
+	}
 	if err != nil {
 		_ = outer.Down()
 		return nil, fmt.Errorf("wgtun: outer handshake: %w", err)
 	}
 	outerCfg.Endpoint = connectedOuter
-	phase("outer-handshake")
+
+	outerRM := newRouteManager(outer.luid(), outerCfg.DNS)
 	if err := outerRM.applyHostRouteOnly(connectedOuter); err != nil {
 		_ = outer.Down()
 		return nil, fmt.Errorf("wgtun: outer endpoint route: %w", err)
@@ -244,6 +278,14 @@ func (s *StackedTunnel) Down() error {
 		}
 	}
 
+	// Physical-link metric last, for the same reason as Manager.Stop.
+	if s.link != nil {
+		if err := s.link.restore(); err != nil {
+			errs = append(errs, err)
+		}
+		s.link = nil
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -330,13 +372,6 @@ func BuildStacked(configDir, accountPath string) (outerCfg, innerCfg Config, err
 	if err != nil {
 		return Config{}, Config{}, fmt.Errorf("wgtun: outer identity: %w", err)
 	}
-	// Drop the outer Reserved bytes, same as the inner wireguard-type account:
-	// on this machine any handshake carrying them is rejected (single-layer
-	// proved a no-Reserved account connects; the Reserved-carrying outer
-	// identity failed the entire 112-endpoint pool). wgcf-style .conf shipping
-	// also sends no reserved bytes.
-	outerCfg.Reserved = [3]byte{}
-	outerCfg.HasReserved = false
 
 	outerCfg.Endpoint = fastestCachedEndpoint()
 	if outerCfg.Endpoint == "" {

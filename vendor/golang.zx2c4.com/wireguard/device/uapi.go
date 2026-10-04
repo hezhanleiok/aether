@@ -156,7 +156,7 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 		if line == "" {
 			// Blank line means terminate operation.
 			peer.handlePostConfig()
-			return nil
+			return device.applyJunkConfig()
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
@@ -176,6 +176,36 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 			continue
 		}
 
+		// AmneziaWG junk keys (Xiaohe patch). They are device-level, but an
+		// Amnezia .conf puts them in [Interface] (before the peer block) while
+		// our own buildUAPI appends them at the end, so they must be accepted
+		// in either section — hence handling them before the device/peer
+		// dispatch. Values are staged and applied together by applyJunkConfig
+		// once the whole operation is known, so key order does not matter.
+		switch key {
+		case "jc":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse jc: %w", err)
+			}
+			device.junkPending.count = n
+			continue
+		case "jmin":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse jmin: %w", err)
+			}
+			device.junkPending.minSize = n
+			continue
+		case "jmax":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse jmax: %w", err)
+			}
+			device.junkPending.maxSize = n
+			continue
+		}
+
 		var err error
 		if deviceConfig {
 			err = device.handleDeviceLine(key, value)
@@ -190,6 +220,24 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 
 	if err := scanner.Err(); err != nil {
 		return ipcErrorf(ipc.IpcErrorIO, "failed to read input: %w", err)
+	}
+	return device.applyJunkConfig()
+}
+
+// applyJunkConfig validates and installs the junk parameters staged by the jc /
+// jmin / jmax keys of the current UAPI operation, then clears the staging area
+// so a later operation that omits them does not re-apply stale values. It is
+// called once per IpcSet, after every other key has been handled, which is what
+// makes the validation independent of key order.
+func (device *Device) applyJunkConfig() error {
+	p := device.junkPending
+	device.junkPending = awgJunkParams{}
+	err := device.junk.configure(p)
+	if err != nil {
+		return ipcErrorf(ipc.IpcErrorInvalid, "junk config: %w", err)
+	}
+	if p.count > 0 {
+		device.log.Verbosef("UAPI: junk packets enabled (jc=%d jmin=%d jmax=%d)", p.count, p.minSize, p.maxSize)
 	}
 	return nil
 }
