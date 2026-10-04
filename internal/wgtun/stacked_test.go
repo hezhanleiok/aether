@@ -80,10 +80,11 @@ func TestExcludeEndpoint(t *testing.T) {
 	}
 }
 
-// TestBuildStacked verifies the offline assembly: outer identity from aether.toml
-// (with its Reserved), inner from a saved account file (Reserved dropped — a
-// tunnel_type=wireguard account fails its handshake with Reserved applied),
-// outer endpoint = fastest cached, inner endpoint differs.
+// TestBuildStacked verifies the offline assembly: outer identity from
+// aether.toml, inner from a saved account file (the account's Reserved field is
+// recorded by register.go but never reaches the handshake — WARP rejects
+// non-zero reserved bytes), outer endpoint = fastest cached, inner endpoint
+// differs.
 func TestBuildStacked(t *testing.T) {
 	origDir := stateDir
 	stateDir = t.TempDir()
@@ -122,18 +123,8 @@ assigned_endpoint = "162.159.192.7"
 	if outerCfg.PrivateKey != "UGC3bYif/poF1x11MGunhAUnvoVqCY2raka2iasXCX4=" {
 		t.Fatalf("outer priv = %q", outerCfg.PrivateKey)
 	}
-	if outerCfg.Reserved != [3]byte{} || outerCfg.HasReserved {
-		t.Fatalf("outer reserved = %v hasReserved=%v, want dropped", outerCfg.Reserved, outerCfg.HasReserved)
-	}
 	if innerCfg.PrivateKey != inner.PrivateKey {
 		t.Fatalf("inner priv mismatch")
-	}
-	if innerCfg.Reserved != [3]byte{} || innerCfg.HasReserved {
-		t.Fatalf("inner reserved = %v hasReserved=%v, want none (wireguard-type account rejects it)",
-			innerCfg.Reserved, innerCfg.HasReserved)
-	}
-	if outerCfg.HasReserved {
-		t.Fatal("outer reserved must be dropped in BuildStacked (Reserved-carrying handshakes are rejected end-to-end)")
 	}
 	if innerCfg.InterfaceName != "Xiaohe-inner" {
 		t.Fatalf("inner ifname = %q", innerCfg.InterfaceName)

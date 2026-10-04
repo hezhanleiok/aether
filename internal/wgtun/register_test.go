@@ -56,11 +56,18 @@ func TestRegisterAccount(t *testing.T) {
 		if req["key"] == "" {
 			t.Errorf("missing key in request")
 		}
-		if req["key_type"] != "curve25519" {
-			t.Errorf("key_type = %q, want curve25519", req["key_type"])
+		// The body mirrors the reference client (E:\warp): `type=Android` and
+		// NO tunnel_type / key_type. Pinning tunnel_type=wireguard the way wgcf
+		// does is what produced an account whose handshake the native tunnel
+		// could not complete, so these fields must stay absent.
+		if req["type"] != "Android" {
+			t.Errorf("type = %q, want Android", req["type"])
 		}
-		if req["tunnel_type"] != "wireguard" {
-			t.Errorf("tunnel_type = %q, want wireguard", req["tunnel_type"])
+		if _, ok := req["key_type"]; ok {
+			t.Errorf("key_type must not be sent (got %q)", req["key_type"])
+		}
+		if _, ok := req["tunnel_type"]; ok {
+			t.Errorf("tunnel_type must not be sent (got %q)", req["tunnel_type"])
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{

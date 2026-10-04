@@ -158,6 +158,64 @@ func TestRevertPartialFailure(t *testing.T) {
 	}
 }
 
+// TestRestoreLinkMetricsOnlyWritesDrifted covers the physical-link metric guard
+// (the 2026-10-04 "WLAN metric left altered" incident): it must restore a
+// drifted family, must NOT write to a family that still matches the snapshot,
+// must treat a vanished adapter as "nothing to restore", and must surface a real
+// restore failure. Mocks only — never touches real state.
+func TestRestoreLinkMetricsOnlyWritesDrifted(t *testing.T) {
+	origGet, origSet := revertGetMetric, revertSetMetric
+	defer func() { revertGetMetric, revertSetMetric = origGet, origSet }()
+
+	type key struct {
+		luid   uint64
+		family uint16
+	}
+	// current models the live adapters: IPv4 drifted to metric 0 / auto 0 (the
+	// exact shape observed on WLAN), IPv6 still at its snapshot value.
+	current := map[key]ifMetricState{
+		{1, windows.AF_INET}:  {have: true, metric: 0, auto: 0},
+		{1, windows.AF_INET6}: {have: true, metric: 30, auto: 1},
+	}
+	var writes []key
+	revertGetMetric = func(row *windows.MibIpInterfaceRow) error {
+		st, ok := current[key{row.InterfaceLuid, row.Family}]
+		if !ok {
+			return windows.ERROR_NOT_FOUND // adapter gone
+		}
+		row.Metric = st.metric
+		row.UseAutomaticMetric = st.auto
+		return nil
+	}
+	revertSetMetric = func(row *windows.MibIpInterfaceRow) error {
+		writes = append(writes, key{row.InterfaceLuid, row.Family})
+		current[key{row.InterfaceLuid, row.Family}] = ifMetricState{have: true, metric: row.Metric, auto: row.UseAutomaticMetric}
+		return nil
+	}
+
+	entries := []linkMetricJSON{
+		{LUID: 1, Family: windows.AF_INET, Metric: 30, Auto: 1},   // drifted
+		{LUID: 1, Family: windows.AF_INET6, Metric: 30, Auto: 1},  // matches: must not be written
+		{LUID: 2, Family: windows.AF_INET, Metric: 25, Auto: 1},   // adapter gone: skipped, no error
+	}
+	if err := restoreLinkMetrics(entries); err != nil {
+		t.Fatalf("restoreLinkMetrics: %v", err)
+	}
+	if len(writes) != 1 || writes[0] != (key{1, windows.AF_INET}) {
+		t.Fatalf("writes = %v; want exactly the drifted IPv4 entry", writes)
+	}
+	if got := current[key{1, windows.AF_INET}]; got.metric != 30 || got.auto != 1 {
+		t.Fatalf("restored = metric %d auto %d; want 30/1", got.metric, got.auto)
+	}
+
+	// A real restore failure must be reported, not swallowed.
+	revertSetMetric = func(row *windows.MibIpInterfaceRow) error { return windows.ERROR_ACCESS_DENIED }
+	current[key{1, windows.AF_INET6}] = ifMetricState{have: true, metric: 0, auto: 0}
+	if err := restoreLinkMetrics([]linkMetricJSON{{LUID: 1, Family: windows.AF_INET6, Metric: 30, Auto: 1}}); err == nil {
+		t.Fatal("restoreLinkMetrics with a failing Set: want error, got nil")
+	}
+}
+
 // TestStateFileLifecycle covers the crash-recovery round trip: a state file
 // written before a crash is picked up by recoverFromState, which restores the
 // recorded metric/routes and then deletes the file. Uses mocks + a temp dir, no

@@ -5,6 +5,8 @@ package wgtun
 import (
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestKeyToHex(t *testing.T) {
@@ -29,7 +31,6 @@ func TestBuildUAPI(t *testing.T) {
 		PrivateKey:    priv,
 		PeerPublicKey: pub,
 		Endpoint:      "162.159.192.7:2408",
-		Reserved:      [3]byte{243, 57, 212},
 	}
 	out, err := buildUAPI(cfg)
 	if err != nil {
@@ -50,16 +51,71 @@ func TestBuildUAPI(t *testing.T) {
 	}
 }
 
-// TestReservedEncoding locks in the WARP reserved-bytes convention: the three
-// bytes must land in the top three bytes of the initiation's uint32 type field
-// (byte 0 is the message type, bytes 1..3 are the reserved client identifier).
-func TestReservedEncoding(t *testing.T) {
-	const msgType = 1 // device.MessageInitiationType
-	reserved := [3]byte{0xF3, 0x39, 0xD4}
-	// 243,57,212 is the Reserved triple from aether.toml ("Fzk=..."-style id).
-	typ := msgType | uint32(reserved[0])<<8 | uint32(reserved[1])<<16 | uint32(reserved[2])<<24
-	if got := []byte{byte(typ), byte(typ >> 8), byte(typ >> 16), byte(typ >> 24)}; got[0] != 1 || got[1] != reserved[0] || got[2] != reserved[1] || got[3] != reserved[2] {
-		t.Fatalf("reserved encoding wrong: %v", got)
+// TestSetAdapterMTU asserts the MTU fix issues the right syscall arguments for
+// BOTH families: this is what separates "adapter MTU really pinned to 1280"
+// (like the official client) from "wireguard-go merely reports 1280" (the bug —
+// the adapter stayed at wintun's 65535 default and TCP emitted packets the
+// tunnel could not carry).
+func TestSetAdapterMTU(t *testing.T) {
+	orig := setInterfaceEntry
+	defer func() { setInterfaceEntry = orig }()
+
+	var got []windows.MibIpInterfaceRow
+	setInterfaceEntry = func(row *windows.MibIpInterfaceRow) error {
+		got = append(got, *row)
+		return nil
+	}
+
+	const luid = 0x1122334455667788
+	if err := setAdapterMTU(luid, 1280); err != nil {
+		t.Fatalf("setAdapterMTU: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("syscalls = %d, want 2 (IPv4 + IPv6)", len(got))
+	}
+	wantFamilies := []uint16{windows.AF_INET, windows.AF_INET6}
+	for i, row := range got {
+		if row.Family != wantFamilies[i] {
+			t.Errorf("call %d: family = %d, want %d", i, row.Family, wantFamilies[i])
+		}
+		if row.InterfaceLuid != luid {
+			t.Errorf("call %d: luid = %#x, want %#x", i, row.InterfaceLuid, luid)
+		}
+		if row.NlMtu != 1280 {
+			t.Errorf("call %d: NlMtu = %d, want 1280", i, row.NlMtu)
+		}
+	}
+
+	// A rejected MTU must be reported, and a rejected family must not stop the
+	// other one from being configured.
+	got = nil
+	calls := 0
+	setInterfaceEntry = func(row *windows.MibIpInterfaceRow) error {
+		calls++
+		if calls == 1 {
+			return windows.ERROR_ACCESS_DENIED
+		}
+		got = append(got, *row)
+		return nil
+	}
+	if err := setAdapterMTU(luid, 1280); err == nil {
+		t.Fatal("first family failing: want error")
+	}
+	if len(got) != 1 || got[0].Family != windows.AF_INET6 {
+		t.Fatalf("IPv6 not configured after IPv4 failed: %+v", got)
+	}
+
+	// An invalid MTU must not touch the adapter at all.
+	got = nil
+	setInterfaceEntry = func(row *windows.MibIpInterfaceRow) error {
+		got = append(got, *row)
+		return nil
+	}
+	if err := setAdapterMTU(luid, 0); err == nil {
+		t.Fatal("MTU 0: want error")
+	}
+	if len(got) != 0 {
+		t.Fatalf("invalid MTU issued %d syscalls, want 0", len(got))
 	}
 }
 

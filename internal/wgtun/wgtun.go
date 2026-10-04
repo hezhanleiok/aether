@@ -9,26 +9,17 @@
 // TUN adapter instead of Aether's user-space netstack, matching the data-plane
 // speed of the WireGuard app / wgcf.
 //
-// # WARP reserved bytes
+// # WARP reserved bytes (NOT used)
 //
-// Cloudflare WARP uses the three WireGuard-handshake bytes that follow the
-// message type as a client identifier; upstream wireguard-go hard-codes them
-// to zero, which Cloudflare rejects. The vendored copy of wireguard-go is
-// therefore patched: device.SetReserved([3]byte) feeds those bytes into every
-// initiation packet (see vendor/golang.zx2c4.com/wireguard/device).
-//
-// # VENDOR-PATCH ACCOUNTING (do not lose this)
-//
-// The reserved-bytes change lives directly in
-// vendor/golang.zx2c4.com/wireguard/device (device.go: reserved field +
-// SetReserved; noise-protocol.go: Type carries reserved<<8/16/24). This is a
-// KNOWN LIABILITY: a single `go mod vendor` silently overwrites the patch
-// (Go does not error on a dirty vendor tree), and the WARP handshake then
-// breaks again with zero build-time warning. The patch is not migrated to a
-// local fork + `replace` yet on purpose - a fork adds its own maintenance
-// surface, and this has not run on real hardware. Once the native tunnel is
-// proven on a machine, MOVE the patch to a fork and replace the module, then
-// delete this paragraph.
+// Cloudflare WARP accepts a standard WireGuard handshake with the three bytes
+// after the message type left at zero (the "no reserved" compatibility path).
+// Real-machine testing (2026-10-04) proved that a vendored patch injecting the
+// account's client_id into those bytes made Cloudflare REJECT the handshake,
+// while the same account/endpoint handshakes fine without them — and the
+// reference scanner (sing-box, whose wireguard-go fork has no SetReserved) also
+// sends zero reserved bytes. The reserved patch was therefore removed: the
+// vendored wireguard-go is unmodified upstream, and Config carries no Reserved
+// field. Do not re-add it without re-verifying on real hardware.
 //
 // # KNOWN ISSUES (route/DNS takeover, routes_windows.go)
 //
@@ -47,12 +38,16 @@ package wgtun
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/aethergui/aethergui/internal/logx"
+	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
@@ -69,13 +64,21 @@ type Config struct {
 	InterfaceName string   // "Xiaohe" or similar
 	PrivateKey    string   // base64, 32 bytes
 	PeerPublicKey string   // base64, 32 bytes
-	Reserved      [3]byte  // WARP client_id, decoded from base64
-	HasReserved   bool     // true only when Reserved is meaningful (client_id present / .conf Reserved line)
 	IPv4          string   // e.g. 172.16.0.2
 	IPv6          string   // e.g. 2606:4700:110:...
 	Endpoint      string   // ip:port
 	MTU           int      // 1280 (WARP)
 	DNS           []string // e.g. 1.1.1.1, 1.0.0.1
+
+	// AmneziaWG junk decoys (anti-DPI). JunkCount == 0 disables them, which is
+	// the WireGuard-baseline behaviour. They are one-sided: random packets sent
+	// from the same socket immediately BEFORE each handshake initiation, so the
+	// flow no longer opens with a bare 148-byte WireGuard initiation. The
+	// handshake bytes are unchanged, so any standard WireGuard peer (WARP
+	// included) is unaffected — see the note in device/awgjunk.go.
+	JunkCount   int // Jc
+	JunkMinSize int // Jmin
+	JunkMaxSize int // Jmax
 }
 
 // Tunnel is a running native WireGuard session.
@@ -93,8 +96,8 @@ type tunnel struct {
 	up  bool
 }
 
-// New creates the wintun adapter and the wireguard-go device and applies the
-// WARP reserved bytes. Call Up to configure peers and start, Down to stop.
+// New creates the wintun adapter and the wireguard-go device. Call Up to
+// configure peers, assign the tunnel addresses and start; Down to stop.
 //
 // The first call requires an elevated process (the wintun adapter is a kernel
 // driver) and wintun.dll next to the executable.
@@ -129,12 +132,6 @@ func New(cfg Config) (*tunnel, error) {
 		},
 	}
 	dev := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
-	// Must be applied before the first handshake; otherwise Cloudflare WARP
-	// rejects the initiation (reserved bytes are its client identifier). It is
-	// optional: a plain .conf without a Reserved line keeps them at zero.
-	if cfg.HasReserved {
-		dev.SetReserved(cfg.Reserved)
-	}
 
 	return &tunnel{tun: tdev, dev: dev, cfg: cfg}, nil
 }
@@ -153,6 +150,26 @@ func (t *tunnel) Up() error {
 	if err := t.dev.Up(); err != nil {
 		return fmt.Errorf("wgtun: bringing device up: %w", err)
 	}
+	// Assign addresses AFTER the device is up: wintun only reports the adapter
+	// media-connected once the session starts, and CreateUnicastIpAddressEntry
+	// against a disconnected adapter silently does nothing (observed
+	// 2026-10-04: the call returned success but the adapter ended up with only
+	// an fe80:: link-local, so the tunnel had no IPv4 source address and every
+	// data packet was unreachable).
+	if err := t.assignAddresses(); err != nil {
+		return fmt.Errorf("wgtun: assigning interface address: %w", err)
+	}
+	// MTU: wireguard-go only RECORDS the MTU we passed to CreateTUN (it reports
+	// it back from MTU()); the Windows adapter keeps wintun's default NlMtu of
+	// 65535 unless told otherwise. With 65535, TCP picks a ~1460-byte MSS and
+	// its packets are larger than the tunnel's real path MTU (~1400, measured),
+	// so they are dropped (DF) and the transfer crawls — this was measured at
+	// 6.5 Mbps against 168 Mbps for the official client on the same endpoint.
+	// Failure here is non-fatal: a suboptimal MTU is slow, an aborted connect
+	// is worse.
+	if err := setAdapterMTU(t.luid(), t.cfg.MTU); err != nil {
+		logx.Warnf("[wgtun] setting adapter MTU %d: %v", t.cfg.MTU, err)
+	}
 	t.up = true
 	// Routing/DNS is deliberately NOT handled here: it lives in routes_windows.go
 	// and is driven by Manager, which composes the device lifecycle with the
@@ -165,8 +182,113 @@ func (t *tunnel) Down() error {
 	if t.dev != nil {
 		t.dev.Close()
 	}
+	if t.up {
+		// Remove the interface addresses we added: the wintun adapter survives
+		// process exit (on-demand pool), and a stale 172.16.0.2 on it would
+		// break the next connect's assignment.
+		t.removeAddresses()
+	}
 	t.up = false
 	return nil
+}
+
+// setInterfaceEntry is the syscall seam used by setAdapterMTU, so its arguments
+// can be asserted offline (no adapter, no elevation).
+var setInterfaceEntry = setIpInterfaceEntry
+
+// setAdapterMTU pins the wintun adapter's MTU (NlMtu) for both address
+// families. This is what the official WireGuard client does with the MTU line
+// in its .conf; without it the adapter stays at wintun's 65535 default and TCP
+// emits packets the tunnel cannot carry.
+//
+// Both families must be set: with IPv4 pinned and IPv6 left at 65535, an AAAA
+// answer would still be tried with jumbo-sized v6 packets.
+func setAdapterMTU(luid uint64, mtu int) error {
+	if mtu <= 0 {
+		return fmt.Errorf("invalid MTU %d", mtu)
+	}
+	var errs []error
+	for _, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
+		var row windows.MibIpInterfaceRow
+		initializeIpInterfaceEntry(&row)
+		row.Family = family
+		row.InterfaceLuid = luid
+		row.NlMtu = uint32(mtu)
+		if err := setInterfaceEntry(&row); err != nil {
+			errs = append(errs, fmt.Errorf("family %d: %w", family, err))
+			continue
+		}
+		logx.Infof("[wgtun] adapter MTU set to %d (family=%d)", mtu, family)
+	}
+	return errors.Join(errs...)
+}
+
+// assignAddresses installs the tunnel's IPv4 (/32) and IPv6 (/128) unicast
+// addresses on the wintun adapter. IPv4 is required; IPv6 is best-effort
+// (a missing v6 just disables v6 through the tunnel). Infinite lifetimes keep
+// the assignment for the adapter's lifetime.
+func (t *tunnel) assignAddresses() error {
+	if v4 := net.ParseIP(t.cfg.IPv4); v4 != nil {
+		row := t.unicastRow(sockaddrInet4(v4.To4()), 32)
+		if err := createUnicastIpAddressEntry(&row); err != nil && !isAlreadyExists(err) {
+			return fmt.Errorf("IPv4 %s: %w", t.cfg.IPv4, err)
+		}
+		logx.Infof("[wgtun] assigned %s/32 to wintun adapter", t.cfg.IPv4)
+	} else {
+		logx.Warnf("[wgtun] no IPv4 address in config; wintun adapter has no source address")
+	}
+	if v6 := net.ParseIP(t.cfg.IPv6); v6 != nil && v6.To16() != nil && t.cfg.IPv6 != "" {
+		row := t.unicastRow(sockaddrInet6(v6.To16()), 128)
+		if err := createUnicastIpAddressEntry(&row); err != nil && !isAlreadyExists(err) {
+			// Best-effort: a failed v6 address must not kill an otherwise
+			// working v4 tunnel.
+			logx.Warnf("[wgtun] IPv6 address %s skipped: %v", t.cfg.IPv6, err)
+		}
+	}
+	return nil
+}
+
+// removeAddresses deletes the addresses assignAddresses added. Errors are
+// logged, not returned: Down must always finish teardown.
+func (t *tunnel) removeAddresses() {
+	if v4 := net.ParseIP(t.cfg.IPv4); v4 != nil {
+		row := t.unicastRow(sockaddrInet4(v4.To4()), 32)
+		if err := deleteUnicastIpAddressEntry(&row); err != nil && !isNotFound(err) {
+			logx.Warnf("[wgtun] removing IPv4 address: %v", err)
+		}
+	}
+	if v6 := net.ParseIP(t.cfg.IPv6); v6 != nil && v6.To16() != nil && t.cfg.IPv6 != "" {
+		row := t.unicastRow(sockaddrInet6(v6.To16()), 128)
+		if err := deleteUnicastIpAddressEntry(&row); err != nil && !isNotFound(err) {
+			logx.Warnf("[wgtun] removing IPv6 address: %v", err)
+		}
+	}
+}
+
+// unicastRow builds a MIB_UNICASTIPADDRESS_ROW for one address on this
+// adapter, with infinite lifetime and an on-link prefix of /32 (v4) or /128
+// (v6) — a point-to-point tunnel address, matching what sing-box's system
+// stack and the official WireGuard client install.
+func (t *tunnel) unicastRow(sa windows.RawSockaddrInet, prefixLen uint8) windows.MibUnicastIpAddressRow {
+	var row windows.MibUnicastIpAddressRow
+	initializeUnicastIpAddressEntry(&row)
+	// MibUnicastIpAddressRow.Address is the SOCKADDR_INET union, typed as
+	// RawSockaddrInet6 by x/sys. Both families' sockaddr share the first 16
+	// bytes (family + body); copy bytewise so IPv4 bytes land correctly and the
+	// Initialize-zeroed padding stays clean.
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&row.Address)), 16),
+		unsafe.Slice((*byte)(unsafe.Pointer(&sa)), 16))
+	row.InterfaceLuid = t.luid()
+	row.OnLinkPrefixLength = prefixLen
+	row.ValidLifetime = 0xFFFFFFFF
+	row.PreferredLifetime = 0xFFFFFFFF
+	// NL_PREFIX_ORIGIN/NL_SUFFIX_ORIGIN: 1 == Manual. Initialize leaves these
+	// as "Unchanged" (16), and Windows then discards the entry — the call
+	// returns success while the adapter keeps only its fe80:: link-local.
+	// wireguard-windows' winipcfg sets both to Manual for exactly this reason.
+	row.PrefixOrigin = 1
+	row.SuffixOrigin = 1
+	return row
 }
 
 // stats returns the peer's cumulative transmit/receive byte counts from the
@@ -228,6 +350,45 @@ func (t *tunnel) WaitHandshake(timeout time.Duration) error {
 	return fmt.Errorf("handshake did not complete within %v", timeout)
 }
 
+// lastHandshakeAge reports how long ago the peer's last completed handshake
+// was. A healthy peer rekeys well before handshakeStaleAfter, so a large age
+// means the endpoint stopped answering even if no user traffic happened to be
+// flowing (which is what makes this usable as a liveness signal while idle).
+func (t *tunnel) lastHandshakeAge() (time.Duration, bool) {
+	if t.dev == nil {
+		return 0, false
+	}
+	s, err := t.dev.IpcGet()
+	if err != nil {
+		return 0, false
+	}
+	sec := parseLastHandshakeSec(s)
+	if sec <= 0 {
+		return 0, false // never handshaken
+	}
+	return time.Since(time.Unix(sec, 0)), true
+}
+
+// parseLastHandshakeSec pulls the newest last_handshake_time_sec out of a UAPI
+// "get" dump. Pure, so it is unit-testable without a device.
+func parseLastHandshakeSec(uapi string) int64 {
+	const prefix = "last_handshake_time_sec="
+	var newest int64
+	for _, line := range strings.Split(uapi, "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		secs, err := strconv.ParseInt(strings.TrimSpace(line[len(prefix):]), 10, 64)
+		if err != nil {
+			continue
+		}
+		if secs > newest {
+			newest = secs
+		}
+	}
+	return newest
+}
+
 // hasHandshake reports whether a UAPI "get" dump shows at least one peer whose
 // handshake has completed (last_handshake_time_sec > 0). Pure, so unit-testable.
 func hasHandshake(uapi string) bool {
@@ -273,6 +434,13 @@ func buildUAPI(cfg Config) (string, error) {
 	fmt.Fprintf(&b, "allowed_ip=0.0.0.0/0\n")
 	fmt.Fprintf(&b, "allowed_ip=::/0\n")
 	fmt.Fprintf(&b, "persistent_keepalive_interval=25\n")
+	// Junk decoys last: they are device-level keys and are applied (and
+	// validated) only after the whole UAPI operation has been read.
+	if cfg.JunkCount > 0 {
+		fmt.Fprintf(&b, "jc=%d\n", cfg.JunkCount)
+		fmt.Fprintf(&b, "jmin=%d\n", cfg.JunkMinSize)
+		fmt.Fprintf(&b, "jmax=%d\n", cfg.JunkMaxSize)
+	}
 	return b.String(), nil
 }
 
