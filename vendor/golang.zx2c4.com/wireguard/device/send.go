@@ -266,7 +266,6 @@ func (device *Device) RoutineReadFromTUN() {
 
 			elem := elems[i]
 			elem.packet = bufs[i][offset : offset+sizes[i]]
-			device.log.Verbosef("[DUMP-TUN] read from TUN: len=%d", len(elem.packet))
 
 			// lookup peer
 			var peer *Peer
@@ -534,7 +533,6 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		for _, elem := range elemsContainer.elems {
 			if len(elem.packet) != MessageKeepaliveSize {
 				dataSent = true
-				device.log.Verbosef("[DUMP-SEND] sending data packet: len=%d", len(elem.packet))
 			}
 			bufs = append(bufs, elem.packet)
 		}

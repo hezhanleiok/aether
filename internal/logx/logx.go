@@ -110,18 +110,26 @@ func SetLevel(level string) {
 
 func log(l Level, format string, args ...any) {
 	mu.Lock()
+	// The level gate must come FIRST and skip EVERYTHING, not just the file
+	// write. Until 2026-10-05 it only filtered the SSE subscribers: every
+	// below-level entry was still formatted (Sprintf), retained, timestamped and
+	// appended to aethergui.log — all of it under this one global mutex. With
+	// per-packet DUMP instrumentation that was ~20k lines/second during a
+	// 100 Mbps download, sitting directly on the tunnel's receive hot path.
+	//
+	// The check stays inside the mutex because SetLevel writes minLvl under it.
+	if l < minLvl {
+		mu.Unlock()
+		return
+	}
 	e := Entry{When: time.Now(), Lvl: l.String(), Msg: fmt.Sprintf(format, args...)}
 	entries = append(entries, e)
 	if len(entries) > maxEntries {
 		entries = entries[len(entries)-maxEntries:]
 	}
 	f := file
-	lvl := minLvl
-	_ = lvl
 	var subs []func(Entry)
-	if l >= minLvl {
-		subs = append(subs, onChange...)
-	}
+	subs = append(subs, onChange...)
 	mu.Unlock()
 	if f != nil {
 		_, _ = f.WriteString(fmt.Sprintf("%s [%s] %s\n", e.When.Format(time.RFC3339), e.Lvl, e.Msg))

@@ -125,11 +125,6 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		}
 		deathSpiral = 0
 
-		// TEMP DEBUG: log every datagram the UDP socket receives.
-		for i := 0; i < count; i++ {
-			device.log.Verbosef("[DUMP-RECV] udp recv: len=%d from=%s", sizes[i], endpoints[i].DstToString())
-		}
-
 		// handle each packet in the batch
 		for i, size := range sizes[:count] {
 			if size < MinMessageSize {
@@ -526,8 +521,6 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 			peer.timersDataReceived()
 		}
 		if len(bufs) > 0 {
-			// TEMP DEBUG: log every decrypted packet written to the TUN device.
-			device.log.Verbosef("[DUMP-RECV] tun write: packets=%d", len(bufs))
 			_, err := device.tun.device.Write(bufs, MessageTransportOffsetContent)
 			if err != nil && !device.isClosed() {
 				device.log.Errorf("Failed to write packets to TUN device: %v", err)
