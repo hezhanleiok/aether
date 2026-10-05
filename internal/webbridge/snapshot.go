@@ -17,25 +17,38 @@ import (
 
 // Protocol is one transport the user can switch to from the main screen.
 type Protocol struct {
-	Key   string `json:"key"` // auto | wg | h2 | h3 | mim | gool
+	Key   string `json:"key"` // auto | wg | awg | h3 | mim | gool
 	Label string `json:"label"`
 	Mode  string `json:"mode"`
 	Proto string `json:"proto"`
 	UseH2 bool   `json:"useH2"`
+	// Native forces the native WireGuard backend (wintun + wireguard-go).
+	// Only it can send AmneziaWG junk, so AWG implies it.
+	Native bool `json:"native"`
+	// AWG turns the AmneziaWG junk decoys on (see config.Settings.AWGJunk).
+	AWG bool `json:"awg"`
 	// Note is an honest caveat shown next to the picker. It is only ever set
-	// for transports that were measured failing — never as a guess.
+	// for transports that were measured failing or that are only partly
+	// implemented — never as a guess.
 	Note string `json:"note,omitempty"`
 }
 
 // Protocols is the switcher model (order matters: the grid renders it as-is).
 var Protocols = []Protocol{
 	{Key: "wg", Label: "WireGuard", Mode: string(config.ModeWARP), Proto: "wg"},
-	// Measured with core 2.1.0 on a filtered network: the TCP/443 TLS
-	// handshake is reset (os error 10054/10060) with fragmentation on, off,
-	// and at the core's default granularity alike. Kept selectable; the UI
-	// says so instead of silently failing.
-	{Key: "h2", Label: "MasqueH2", Mode: string(config.ModeMasqueH2), Proto: "masque", UseH2: true,
-		Note: "实测（Core 2.1.0）：当前网络下 TLS 握手失败，可能无法连接"},
+	// AWG (AmneziaWG): WireGuard with junk decoys in front of every handshake
+	// initiation. It replaced MasqueH2 in this slot: MASQUE/H2 was measured
+	// failing with core 2.1.0 on this network (the TCP/443 TLS handshake is
+	// reset with os error 10054/10060 with fragmentation on and off alike),
+	// while the WireGuard-class transports do connect here.
+	//
+	// Scope note (honest, from the code): only the junk half is implemented —
+	// Jc/Jmin/Jmax. AmneziaWG's fake first packet (I1) is NOT, and warpscout
+	// reports that I1, not the junk sizes, is what usually gets a connection
+	// past a filter. Expect "handshake no longer opens with a bare 148-byte
+	// initiation", not "unblockable".
+	{Key: "awg", Label: "AWG", Mode: string(config.ModeWireGuard), Proto: "wg", Native: true, AWG: true,
+		Note: "AmneziaWG 混淆：仅实现 junk（Jc/Jmin/Jmax），I1 伪装首包未实现；需要 native 后端 + 管理员权限"},
 	{Key: "h3", Label: "MasqueH3", Mode: string(config.ModeMasqueH3), Proto: "masque"},
 	// MIM's inner hop rides QUIC by default, and that is the first thing DPI
 	// breaks: measured on this network, every inner edge closed with QUIC code
@@ -49,6 +62,24 @@ var Protocols = []Protocol{
 		Note: "实测（Core 2.1.0）：HTTP/3 内层被掐断、HTTP/2 握手失败，可能无法连接"},
 	{Key: "gool", Label: "Gool", Mode: string(config.ModeGool), Proto: "gool"},
 	{Key: "auto", Label: "自动最佳", Mode: string(config.ModeAuto), Proto: ""},
+}
+
+// protocolList is the switcher model for this build. It is Protocols with the
+// AWG entry flagged when the native backend is missing: without it there is
+// nothing that can send AmneziaWG junk, so the entry would otherwise look
+// selectable and quietly behave like plain WireGuard.
+func protocolList() []Protocol {
+	if app.NativeAvailable() {
+		return Protocols
+	}
+	out := make([]Protocol, len(Protocols))
+	copy(out, Protocols)
+	for i := range out {
+		if out[i].AWG {
+			out[i].Note = "当前构建未编译 native 后端（-tags wgtun）：AWG 不可用"
+		}
+	}
+	return out
 }
 
 // ProtocolByKey resolves a switcher entry.
@@ -69,6 +100,11 @@ func ProtocolKey(s config.Settings) string {
 	case s.Mode == config.ModeGool || s.Protocol == "gool":
 		return "gool"
 	case s.Mode == config.ModeWARP || s.Mode == config.ModeWireGuard || s.Protocol == "wg":
+		// AWG is WireGuard + junk on the native backend, so it is a property
+		// of the WireGuard-class modes rather than a mode of its own.
+		if s.AWGJunk {
+			return "awg"
+		}
 		return "wg"
 	case s.UseH2 && (s.Mode == config.ModeMasqueH2 || s.Mode == config.ModeMasqueH3 || s.Protocol == "masque"):
 		return "h2"
@@ -223,7 +259,7 @@ func (b *Bridge) snapshot() Snapshot {
 			Valid:       tr.Valid,
 		},
 		Settings:   s,
-		Protocols:  Protocols,
+		Protocols:  protocolList(),
 		ActiveKey:  active,
 		Nodes:      nodes,
 		ActiveNode: a.ActiveNodeID(),

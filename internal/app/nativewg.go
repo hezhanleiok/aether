@@ -48,6 +48,11 @@ func nativeWGResiduePresent() bool {
 	return wgtun.ResiduePresent()
 }
 
+// NativeAvailable reports whether this build ships the native backend. AWG
+// needs it (only the native device sends AmneziaWG junk), so a build without
+// it must flag the entry rather than silently running plain WireGuard.
+func NativeAvailable() bool { return true }
+
 // useNativeWG reports whether this connect should run the native WireGuard
 // backend instead of the core. Only the WireGuard-class modes qualify: the
 // WARP identity in aether.toml is what the native tunnel reuses, and MASQUE /
@@ -80,6 +85,23 @@ func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 	if err != nil {
 		a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, err.Error())
 		return err
+	}
+	// AWG (AmneziaWG junk decoys) is decided by the UI switch, not by
+	// wgtun-override.conf: a protocol picker that silently disagreed with the
+	// file would make every "is junk on?" answer unfalsifiable. Junk ON takes
+	// the settings' numbers (or the defaults); junk OFF is the plain
+	// WireGuard baseline, whatever the identity file said.
+	if s.AWGJunk {
+		if s.JunkCount > 0 {
+			cfg.JunkCount, cfg.JunkMinSize, cfg.JunkMaxSize = s.JunkCount, s.JunkMinSize, s.JunkMaxSize
+		} else {
+			cfg.JunkCount = config.DefaultJunkCount
+			cfg.JunkMinSize = config.DefaultJunkMinSize
+			cfg.JunkMaxSize = config.DefaultJunkMaxSize
+		}
+		logx.Infof("[app] native WireGuard: AWG junk ON (jc=%d jmin=%d jmax=%d)", cfg.JunkCount, cfg.JunkMinSize, cfg.JunkMaxSize)
+	} else {
+		cfg.JunkCount, cfg.JunkMinSize, cfg.JunkMaxSize = 0, 0, 0
 	}
 
 	m := &wgtun.Manager{}
@@ -267,6 +289,12 @@ func (a *App) connectNativeStacked(ctx context.Context, s config.Settings) error
 	if err != nil {
 		a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, err.Error())
 		return err
+	}
+	// Honest about the gap: the stacked path builds the outer device from
+	// BuildStacked, which does not carry the junk settings, so "AWG selected"
+	// and "stacked on" together would silently be plain WireGuard-in-WireGuard.
+	if s.AWGJunk {
+		logx.Warnf("[app] AWG junk is not applied in stacked mode (the outer device is built from BuildStacked)")
 	}
 
 	outerCfg, innerCfg, err := wgtun.BuildStacked(config.Dir(), account)

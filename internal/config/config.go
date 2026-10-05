@@ -55,6 +55,15 @@ const (
 	ScanIronclad ScanMode = "ironclad"
 )
 
+// AmneziaWG junk defaults. These are warpscout's own defaults (-jc 6,
+// -jmin 10, -jmax 50) — the same numbers AmneziaWG clients ship with, and the
+// ones the local A/B runs measured with.
+const (
+	DefaultJunkCount   = 6
+	DefaultJunkMinSize = 10
+	DefaultJunkMaxSize = 50
+)
+
 // Settings is the whole persisted state of the client.
 type Settings struct {
 	// Identity / mode
@@ -77,6 +86,26 @@ type Settings struct {
 	// elevation requirements); only meaningful in WireGuard-class modes and in
 	// wgtun builds. OFF by default.
 	StackedWireGuard bool `json:"stacked_wireguard"`
+
+	// AWGJunk turns on the AmneziaWG junk decoys on the native WireGuard
+	// backend: JunkCount random packets of JunkMinSize..JunkMaxSize bytes are
+	// sent from the same socket immediately BEFORE each handshake initiation,
+	// so the flow no longer opens with a bare 148-byte WireGuard initiation.
+	// This is the "AWG" protocol in the switcher — it is WireGuard with
+	// obfuscation, not a different transport, so it only exists on the native
+	// backend (the core's netstack cannot send them). OFF = WireGuard baseline.
+	//
+	// Honest scope: only the junk half of AmneziaWG is implemented. The fake
+	// first packet (I1, e.g. a canned QUIC Initial) is NOT — and upstream
+	// tooling (warpscout) reports that I1, not the junk sizes, is what usually
+	// gets a connection past DPI. Treat this as "junk on/off", not as full AWG.
+	AWGJunk bool `json:"awg_junk"`
+
+	// Junk parameters used when AWGJunk is on. 0 = use the defaults below
+	// (warpscout's own: -jc 6, -jmin 10, -jmax 50).
+	JunkCount   int `json:"junk_count"`
+	JunkMinSize int `json:"junk_min_size"`
+	JunkMaxSize int `json:"junk_max_size"`
 
 	// Networking
 	IPStack       IPMode `json:"ip_stack"`

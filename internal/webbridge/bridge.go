@@ -390,6 +390,20 @@ func applyProtocol(s config.Settings, p Protocol) config.Settings {
 	s.Mode = config.Mode(p.Mode)
 	s.Protocol = p.Proto
 	s.UseH2 = p.UseH2
+	// Native backend + AWG obfuscation. AWG is not a transport of its own: it
+	// is WireGuard with AmneziaWG junk decoys, and only the native backend can
+	// send them, so selecting it turns the native backend on. Selecting any
+	// other entry turns the junk back off — leaving it on would make the
+	// "WireGuard" baseline silently obfuscated and every A/B meaningless.
+	s.AWGJunk = p.AWG
+	if p.Native {
+		s.NativeWireGuard = true
+	}
+	if p.AWG && s.JunkCount <= 0 {
+		s.JunkCount = config.DefaultJunkCount
+		s.JunkMinSize = config.DefaultJunkMinSize
+		s.JunkMaxSize = config.DefaultJunkMaxSize
+	}
 	return s
 }
 

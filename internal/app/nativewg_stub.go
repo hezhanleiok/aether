@@ -27,6 +27,10 @@ func recoverNativeWGState() error { return nil }
 // nativeSessionAlive is always false without the native backend compiled in.
 func (a *App) nativeSessionAlive() bool { return false }
 
+// NativeAvailable is false without the native backend compiled in: the AWG
+// entry then cannot work and the UI flags it instead of silently falling back.
+func NativeAvailable() bool { return false }
+
 // nativeWGResiduePresent is always false without the native backend.
 func nativeWGResiduePresent() bool { return false }
 

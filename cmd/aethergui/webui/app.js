@@ -497,7 +497,7 @@ function renderCoreBadges() {
 }
 
 // ── protocol switcher ───────────────────────────────────────────
-const PROTO_ICON = { wg: 'i-shield', h2: 'i-split', h3: 'i-wifi', mim: 'i-server', gool: 'i-nodes', auto: 'i-bolt' };
+const PROTO_ICON = { wg: 'i-shield', awg: 'i-shield', h3: 'i-wifi', mim: 'i-server', gool: 'i-nodes', auto: 'i-bolt' };
 function renderProtocols() {
   const sel = $('#protoSelect');
   const list = S.protocols;
