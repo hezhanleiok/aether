@@ -169,6 +169,14 @@ func probeEndpointStrict(addr string, timeout time.Duration) (int64, float64, bo
 // sweep fast enough to beat WARP endpoint drift without saturating the link.
 const udpProbeWorkers = 24
 
+// fastPathProbeWorkers bounds concurrency for the fast-path (cached/seed)
+// liveness pre-screen. Deliberately far below udpProbeWorkers: this runs on
+// EVERY reconnect, so it has to stay indistinguishable from idle background
+// chatter — the 2026-10-04 incident (a 24-worker sweep visibly rate-limiting
+// the user's whole link mid-connect) must not be reproducible by something
+// this frequent. With typically ≤10 cached candidates the cap rarely binds.
+const fastPathProbeWorkers = 8
+
 // failoverPorts are the ports tried against the SAME host when an endpoint
 // dies. Port matters as much as host: observed 2026-10-04, one host was stable
 // for 24 minutes at 250 Mbps on :2408 while its neighbours on :500 died within
@@ -289,15 +297,40 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 	if !useSweep {
 		quick := cachedCandidates(cfg.Endpoint, exclude)
 		if len(quick) > 0 {
-			logx.Infof("[wgtun] fast path: trying %d cached/seed endpoints first", len(quick))
-			return quick, nil
+			// Cheap pre-screen BEFORE paying handshake timeouts. The fast path
+			// used to hand these candidates straight to handshakeAcross, so a
+			// stale cache cost a full 6s timeout per dead candidate — 6-10
+			// entries meant 36-60s of nothing before the full sweep even
+			// started (the "2-4 minute connect"). WARP answers the stateless
+			// liveness probe regardless of account or key, so filtering costs
+			// one 3-round exchange per candidate instead of a handshake
+			// timeout (~150ms when live, one 800ms timeout when dead — and in
+			// parallel), and it comes back RANKED, so the handshake starts
+			// with the best candidate rather than the oldest cache entry.
+			//
+			// No survivors must fall THROUGH to the sweep below, not return an
+			// error: Start treats an error from here as fatal and would skip
+			// the sweep entirely, turning a stale cache into a dead connect.
+			addrs := make([]string, 0, len(quick))
+			for _, ep := range quick {
+				addrs = append(addrs, ep.Addr)
+			}
+			// No onPhase labels here: the pre-screen is sub-second and the
+			// UI's "scan n/total" wording is the full-sweep's progress. Silence
+			// keeps a healthy reconnect looking exactly like it used to.
+			live := filterLiveStrict(ctx, addrs, fastPathProbeWorkers, nil)
+			if len(live) > 0 {
+				logx.Infof("[wgtun] fast path: %d/%d cached/seed endpoints answered the liveness probe", len(live), len(quick))
+				return live, nil
+			}
+			logx.Infof("[wgtun] fast path: none of the %d cached/seed endpoints answered; falling through to the full sweep", len(quick))
 		}
 	}
 	candidates := buildCandidates(cfg.Endpoint)
 	if exclude != "" {
 		candidates = excludeEndpoint(candidates, exclude)
 	}
-	live := filterLiveStrict(ctx, candidates, onPhase)
+	live := filterLiveStrict(ctx, candidates, udpProbeWorkers, onPhase)
 	if len(live) == 0 {
 		return nil, fmt.Errorf("no endpoint answered the liveness probe (checked %d candidates)", len(candidates))
 	}
@@ -310,14 +343,20 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 
 // filterLiveStrict screens the candidate pool with the strict UDP liveness probe,
 // returning the surviving endpoints sorted by speed estimate descending (fastest
-// first). It is concurrent (bounded by a semaphore) and checks ctx at the
-// enqueue boundary, so a cancelled connect stops scheduling and returns whatever
-// is already known. onPhase, when non-nil, receives throttled progress labels.
-func filterLiveStrict(ctx context.Context, candidates []string, onPhase func(string)) []liveEndpoint {
+// first). It is concurrent (bounded by workers) and checks ctx at the enqueue
+// boundary, so a cancelled connect stops scheduling and returns whatever is
+// already known. Callers pick the concurrency — the full-pool sweep wants
+// udpProbeWorkers for speed, the per-reconnect fast-path pre-screen wants the
+// much smaller fastPathProbeWorkers. onPhase, when non-nil, receives throttled
+// progress labels.
+func filterLiveStrict(ctx context.Context, candidates []string, workers int, onPhase func(string)) []liveEndpoint {
 	if len(candidates) == 0 {
 		return nil
 	}
-	sem := make(chan struct{}, udpProbeWorkers)
+	if workers < 1 {
+		workers = 1
+	}
+	sem := make(chan struct{}, workers)
 	results := make([]liveEndpoint, 0, len(candidates)/10)
 	var mu sync.Mutex
 	var done int64
