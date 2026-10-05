@@ -341,6 +341,18 @@ func (m *Manager) startHealthMonitor() {
 					continue
 				}
 				logx.Warnf("[wgtun] endpoint %s looks dead (%d failed checks); failing over", m.Current(), streak)
+				// Per-tick dedup reset (Step 2.5): the app-side bridge GUARDS its
+				// transitions (a Reconnecting push is only applied while the UI is
+				// Connected), so a push can be legitimately swallowed — e.g. by a
+				// node speed-test holding StatusTesting, after which SetTesting(false)
+				// restores a stale "Connected". With whole-outage dedup the swallowed
+				// push never re-fired and the UI lied for the entire outage. Clearing
+				// notified at the start of EVERY failover round re-arms the push, so
+				// the UI self-heals within one health interval; within a round
+				// notifyState still dedups.
+				m.mu.Lock()
+				m.notified = ""
+				m.mu.Unlock()
 				// State push (failover START): the UI must stop showing a stale
 				// "connected" while every candidate is failing — that was the
 				// 01:11 incident, where failover burned through the whole list
@@ -351,9 +363,10 @@ func (m *Manager) startHealthMonitor() {
 					m.notifyState(StateConnected)
 					streak = 0
 				}
-				// Failover exhausted: stay in StateReconnecting (no further push —
-				// notifyState suppresses duplicates) and keep monitoring; a later
-				// round can still recover if the network comes back.
+				// Failover exhausted: stay in StateReconnecting and keep monitoring;
+				// the next tick clears notified again, so the push re-fires until the
+				// session recovers or the user disconnects. A later round can still
+				// recover if the network comes back.
 			}
 		}
 	}()
