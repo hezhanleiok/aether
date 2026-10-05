@@ -91,8 +91,37 @@ func (c *endpointCache) recordSuccess(addr string, rttMs int64) {
 	})
 }
 
+// evict removes addr from the cache immediately, bypassing the failure
+// threshold. Used when an endpoint is observed DEAD rather than merely slow:
+// during failover every candidate gets a real handshake against the live
+// tunnel, so a failure there is proof, not a sample. Waiting for failThreshold
+// more strikes kept handing the same known-bad endpoint back on every
+// reconnect (162.159.192.164:500 at 0.9 Mbps was picked again and again while
+// still cached).
+//
+// Eviction only costs a hint: the endpoint is re-cached by the next full sweep
+// if it ever comes back, so this cannot lose an endpoint permanently.
+func (c *endpointCache) evict(addr string) {
+	if addr == "" {
+		return
+	}
+	out := c.Endpoints[:0]
+	removed := false
+	for _, e := range c.Endpoints {
+		if e.Addr == addr {
+			removed = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if removed {
+		c.Endpoints = out
+	}
+}
+
 // recordFailure bumps an endpoint's consecutive-failure count and evicts it once
-// it crosses the threshold.
+// it crosses the threshold. Prefer evict for endpoints that are known dead, not
+// merely unlucky: three strikes lets a dead endpoint be retried twice more.
 func (c *endpointCache) recordFailure(addr string) {
 	for i := range c.Endpoints {
 		if c.Endpoints[i].Addr != addr {

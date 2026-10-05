@@ -420,32 +420,52 @@ func (m *Manager) failover() bool {
 			// the default route, i.e. into the current (dead) tunnel.
 			if err := m.routes.addEndpointRouteFor(next); err != nil {
 				logx.Warnf("[wgtun] failover: route for %s: %v", next, err)
+				// Judged dead, not just unlucky: this candidate got a real
+				// handshake (or an attempted one) on the live tunnel, so evict
+				// it now instead of banking another strike toward
+				// failThreshold — a stale entry must not be able to win the
+				// fast path on the next connect.
 				cache := loadCache()
-				cache.recordFailure(next)
+				cache.evict(next)
 				cache.save()
 				continue
 			}
 			if err := m.tunnel.setEndpoint(next); err != nil {
 				logx.Warnf("[wgtun] failover: set endpoint %s: %v", next, err)
 				_ = m.routes.dropEndpointRoute(next)
+				// Judged dead, not just unlucky: this candidate got a real
+				// handshake (or an attempted one) on the live tunnel, so evict
+				// it now instead of banking another strike toward
+				// failThreshold — a stale entry must not be able to win the
+				// fast path on the next connect.
 				cache := loadCache()
-				cache.recordFailure(next)
+				cache.evict(next)
 				cache.save()
 				continue
 			}
 			if err := m.tunnel.WaitHandshake(failoverHandshakeTimeout); err != nil {
 				logx.Warnf("[wgtun] failover: handshake %s: %v", next, err)
 				_ = m.routes.dropEndpointRoute(next)
+				// Judged dead, not just unlucky: this candidate got a real
+				// handshake (or an attempted one) on the live tunnel, so evict
+				// it now instead of banking another strike toward
+				// failThreshold — a stale entry must not be able to win the
+				// fast path on the next connect.
 				cache := loadCache()
-				cache.recordFailure(next)
+				cache.evict(next)
 				cache.save()
 				continue
 			}
 			if err := probeOnce(healthProbeTimeout); err != nil {
 				logx.Warnf("[wgtun] failover: data plane via %s: %v", next, err)
 				_ = m.routes.dropEndpointRoute(next)
+				// Judged dead, not just unlucky: this candidate got a real
+				// handshake (or an attempted one) on the live tunnel, so evict
+				// it now instead of banking another strike toward
+				// failThreshold — a stale entry must not be able to win the
+				// fast path on the next connect.
 				cache := loadCache()
-				cache.recordFailure(next)
+				cache.evict(next)
 				cache.save()
 				continue
 			}
@@ -457,7 +477,12 @@ func (m *Manager) failover() bool {
 			}
 			m.current = next
 			cache := loadCache()
-			cache.recordFailure(old)
+			// The endpoint we just left was declared dead by the health monitor
+			// (consecutive failed checks), so drop it immediately: leaving it
+			// cached makes the next connect's fast path start from a known-bad
+			// endpoint and pay another full 6s handshake timeout before falling
+			// through to the sweep — the 2-4 minute connect this is about.
+			cache.evict(old)
 			cache.recordSuccess(next, 0)
 			cache.save()
 			logx.Infof("[wgtun] failover complete: %s -> %s", old, next)
