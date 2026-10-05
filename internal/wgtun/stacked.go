@@ -40,6 +40,11 @@ type StackedTunnel struct {
 	outer *tunnel
 	inner *tunnel
 
+	// outerEndpoint is the endpoint the OUTER layer actually connected
+	// through (after candidate hot-switching), recorded so callers can log
+	// or display the real endpoint instead of the seed one.
+	outerEndpoint string
+
 	outerRoutes *routeManager
 	innerRoutes *routeManager
 
@@ -139,6 +144,7 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 		return nil, fmt.Errorf("wgtun: outer handshake: %w", err)
 	}
 	outerCfg.Endpoint = connectedOuter
+	s.outerEndpoint = connectedOuter
 
 	outerRM := newRouteManager(outer.luid(), outerCfg.DNS)
 	if err := outerRM.applyHostRouteOnly(connectedOuter); err != nil {
@@ -287,6 +293,13 @@ func (s *StackedTunnel) Down() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// OuterEndpoint returns the endpoint the outer layer actually connected
+// through (empty before the outer handshake completes). The inner endpoint is
+// fixed at config time and never hot-switched, so it needs no equivalent.
+func (s *StackedTunnel) OuterEndpoint() string {
+	return s.outerEndpoint
 }
 
 // Stats returns per-layer transmit/receive byte counters, so the data plane can

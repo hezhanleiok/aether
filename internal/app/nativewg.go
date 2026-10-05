@@ -52,6 +52,15 @@ func (a *App) useNativeWG(s config.Settings) bool {
 	return s.NativeWireGuard && (s.Mode == config.ModeWARP || s.Mode == config.ModeWireGuard)
 }
 
+// nativeSessionAlive reports whether any native backend session is up. The
+// caller must hold connMu. Used by CancelConnect's fallback: a native session
+// in failover has no connect context to cancel, so a /api/cancel press means
+// "stop trying and disconnect" instead of being a silent no-op.
+func (a *App) nativeSessionAlive() bool {
+	return (a.nativeWG != nil && a.nativeWG.Running()) ||
+		(a.nativeStacked != nil)
+}
+
 // connectNativeWG starts the native WireGuard tunnel (wintun + wireguard-go +
 // routes + DNS) and drives the shared state machine to Connected. It bypasses
 // the core entirely: the WARP identity the core provisioned is run at kernel
@@ -70,13 +79,31 @@ func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 	}
 
 	m := &wgtun.Manager{}
+	// Bridge wgtun's session-state transitions onto the shared state machine so
+	// the UI reflects a dying/failing-over endpoint. Guarded on BOTH sides:
+	// the callback can race a user Disconnect (it fires from the health
+	// goroutine, outside connMu), and a late "connected" must never overwrite
+	// the Disconnected that Disconnect() just set. Only sane transitions are
+	// applied; anything else (Failed, Disconnected, a fresh Connecting) wins.
+	m.OnState = func(state string) {
+		switch state {
+		case wgtun.StateReconnecting:
+			if cur := a.VPN.State().Status; cur == vpn.StatusConnected {
+				a.VPN.SetNativeState(vpn.StatusReconnecting, s.Mode, "")
+			}
+		case wgtun.StateConnected:
+			if cur := a.VPN.State().Status; cur == vpn.StatusReconnecting {
+				a.VPN.SetNativeState(vpn.StatusConnected, s.Mode, "")
+			}
+		}
+	}
 	if err := m.Start(ctx, cfg, nil); err != nil {
 		a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, err.Error())
 		return err
 	}
 	a.nativeWG = m
 	a.VPN.SetNativeState(vpn.StatusConnected, s.Mode, "")
-	logx.Infof("[app] native WireGuard up (endpoint %s, mtu %d)", cfg.Endpoint, cfg.MTU)
+	logx.Infof("[app] native WireGuard up (endpoint %s, mtu %d)", m.Current(), cfg.MTU)
 	return nil
 }
 
@@ -161,7 +188,7 @@ func (a *App) connectNativeStacked(ctx context.Context, s config.Settings) error
 	a.nativeStacked = st
 	a.VPN.SetNativeState(vpn.StatusConnected, s.Mode, "")
 	logx.Infof("[app] stacked warp-in-warp up (outer=%s inner=%s, account %s)",
-		outerCfg.Endpoint, innerCfg.Endpoint, filepath.Base(account))
+		st.OuterEndpoint(), innerCfg.Endpoint, filepath.Base(account))
 	return nil
 }
 

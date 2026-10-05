@@ -24,6 +24,9 @@ const nativeWGInterfaceName = ""
 // recoverNativeWGState is a no-op without the native backend.
 func recoverNativeWGState() error { return nil }
 
+// nativeSessionAlive is always false without the native backend compiled in.
+func (a *App) nativeSessionAlive() bool { return false }
+
 // nativeWGResiduePresent is always false without the native backend.
 func nativeWGResiduePresent() bool { return false }
 

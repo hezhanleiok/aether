@@ -580,12 +580,28 @@ func (a *App) Disconnect() {
 // stops promptly rather than running to completion. Safe to call when no connect
 // is running (no-op). This is the mechanism behind the GUI cancel button (2b)
 // and a future watchdog stop path.
+//
+// Native failover fallback: the GUI's power button sends /api/cancel while the
+// UI shows Reconnecting — but a native session in failover has NO connect
+// context to cancel, so the button used to be a silent no-op (failover can run
+// for tens of seconds). When no connect is in flight and a native session is
+// live, treat the press as "stop trying and disconnect".
 func (a *App) CancelConnect() {
 	a.cancelMu.Lock()
 	cancel := a.connectCancel
 	a.cancelMu.Unlock()
 	if cancel != nil {
 		cancel()
+		return
+	}
+	// No connect in flight: is a native session alive? (Reading the native
+	// fields requires connMu; it is released BEFORE Disconnect() re-takes it,
+	// so the call below cannot deadlock on itself.)
+	a.connMu.Lock()
+	nativeAlive := a.nativeSessionAlive()
+	a.connMu.Unlock()
+	if nativeAlive {
+		a.Disconnect()
 	}
 }
 

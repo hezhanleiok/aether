@@ -26,6 +26,24 @@ type Manager struct {
 	// succeeds, and is what failover picks the next candidate relative to.
 	current string
 
+	// OnState reports liveness transitions of a LIVE session:
+	// StateReconnecting when the endpoint dies and the first failover attempt
+	// begins, StateConnected when a failover completed and the session carries
+	// traffic again. Nil-safe. Set BEFORE Start, read-only afterwards. Invoked
+	// from the health-monitor goroutine, outside m.mu — handlers must be quick
+	// and must not call back into blocking Manager methods.
+	OnState func(state string)
+
+	// notified is the last state pushed via OnState, so a transition fires
+	// exactly once (a session stuck failing over must not re-push
+	// "reconnecting" on every health tick). Reset at Start entry.
+	notified string
+
+	// gen is the session generation, bumped at Start entry. The delayed speed
+	// sample compares it after waking, so a disconnect+reconnect during the
+	// sample delay cannot mislabel the new session's measurement.
+	gen uint64
+
 	// healthStop closes the health-monitor goroutine of the live session.
 	healthStop chan struct{}
 
@@ -54,6 +72,12 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	if m.tunnel != nil {
 		return fmt.Errorf("wgtun: already running")
 	}
+	// Session-scoped bookkeeping must start from a clean slate even when this
+	// Manager is being reused: a previous session may have died with
+	// notified=StateReconnecting (or never reset it after a failed Start), and
+	// letting that leak would suppress the new session's first transition.
+	m.notified = ""
+	m.gen++
 
 	// Self-check (connect-time): recover any route/metric/DNS left behind by a
 	// previous unclean exit before touching the system again. Unlike the
@@ -172,20 +196,20 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 
 	// Speed sample is best-effort: it needs a hostname (DNS through the tunnel),
 	// so a DNS hiccup must not fail a connect that can otherwise carry traffic.
-	// speedSampleWindow is deliberately longer than the old 5s: that budget also
-	// covered DNS + TLS + response headers, and a fresh tunnel regularly spent
-	// all of it before the first body byte, so every sample reported "unavailable"
-	// and we never got a number to compare against the reference (2026-10-04).
+	//
+	// Sampling runs DELAYED and ASYNCHRONOUSLY: right after a connect the TCP
+	// flow is deep in slow-start, which is what made the old immediate 3s
+	// sample read 2.6 Mbps on a link doing 63 (2026-10-04 logs). Waiting 10s
+	// lets the route settle and the flow ramp; sampling then lasts
+	// speedSampleDuration instead of the old hardcoded 3s. Async because Start
+	// holds m.mu and the UI's Connected transition waits on Start — a
+	// synchronous 10s sleep would pin every connect in "Connecting".
 	//
 	// ConnectSpeedSample turns it off for survival runs: a 20 MB download fired
 	// right before "how long until this flow is blocked" is measured is exactly
 	// the kind of traffic that can trip a volume-based DPI, i.e. a confound.
 	if ConnectSpeedSample {
-		if mbps, err := measureTunnelSpeed(speedSampleWindow); err != nil {
-			logx.Warnf("[wgtun] speed sample unavailable: %v", err)
-		} else {
-			logx.Infof("[wgtun] speed: %.1f Mbps through %s", mbps, connected)
-		}
+		m.scheduleSpeedSample()
 	}
 
 	keep = true
@@ -223,6 +247,36 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 // is the missing half of endpoint selection, so the manager watches the live
 // session and hot-switches the peer to the next candidate when it goes dead.
 // ---------------------------------------------------------------------------
+
+// Session states reported through Manager.OnState. Wgtun cannot import the
+// vpn package (that would be a reverse dependency), so the app layer maps
+// these onto its own state machine.
+const (
+	// StateConnected: the session is carrying traffic (initial connect or a
+	// completed failover).
+	StateConnected = "connected"
+	// StateReconnecting: the endpoint died and failover is in progress. The
+	// monitor keeps running, so a later round can still recover.
+	StateReconnecting = "reconnecting"
+)
+
+// notifyState pushes a session-state transition through OnState. mu is held
+// only to read the fields; the callback itself runs OUTSIDE mu so a handler
+// that drives the app layer's state machine can never deadlock against us.
+// Duplicate transitions are suppressed via m.notified; a session that is
+// already down suppresses late notifications — Stop/Disconnect owns that
+// transition, and a late "connected" must not overwrite "Disconnected".
+func (m *Manager) notifyState(s string) {
+	m.mu.Lock()
+	if m.tunnel == nil || m.OnState == nil || s == m.notified {
+		m.mu.Unlock()
+		return
+	}
+	m.notified = s
+	cb := m.OnState
+	m.mu.Unlock()
+	cb(s)
+}
 
 var (
 	// healthInterval is how often the live session is checked. A var (not a
@@ -287,9 +341,19 @@ func (m *Manager) startHealthMonitor() {
 					continue
 				}
 				logx.Warnf("[wgtun] endpoint %s looks dead (%d failed checks); failing over", m.Current(), streak)
+				// State push (failover START): the UI must stop showing a stale
+				// "connected" while every candidate is failing — that was the
+				// 01:11 incident, where failover burned through the whole list
+				// with the UI still green. Duplicate-safe via notifyState.
+				m.notifyState(StateReconnecting)
 				if m.failover() {
+					// State push (failover SUCCESS): back to connected.
+					m.notifyState(StateConnected)
 					streak = 0
 				}
+				// Failover exhausted: stay in StateReconnecting (no further push —
+				// notifyState suppresses duplicates) and keep monitoring; a later
+				// round can still recover if the network comes back.
 			}
 		}
 	}()
@@ -514,6 +578,44 @@ func handshakeAcross(t *tunnel, cands []liveEndpoint, timeout time.Duration) (st
 	return "", fmt.Errorf("no endpoint completed a handshake among %d candidates: %w", len(cands), lastErr)
 }
 
+// speedSampleDelay is how long the speed sample waits after a connect before
+// measuring. Right after the route flip the TCP flow is in slow-start and the
+// sample reads a fraction of the real rate (2.6 vs 63 Mbps observed
+// 2026-10-04); 10s lets the flow ramp before the measurement starts.
+const speedSampleDelay = 10 * time.Second
+
+// speedSampleDuration is how long the sample itself runs. The old code broke
+// out of the read loop after a hardcoded 3s, so the window covered almost
+// nothing but slow-start; 10s reaches steady state at WARP speeds.
+const speedSampleDuration = 10 * time.Second
+
+// scheduleSpeedSample launches the delayed, generation-guarded speed sample
+// for the session being started. Callers hold m.mu; the goroutine re-takes it
+// after the delay.
+func (m *Manager) scheduleSpeedSample() {
+	gen := m.gen
+	ep := m.current
+	go func() {
+		time.Sleep(speedSampleDelay)
+		// Generation guard: if the session this sample was scheduled for is
+		// gone (user disconnected / reconnected while we slept), skip — a
+		// naive Running() check would happily sample the NEW session and
+		// mislabel it as the old one.
+		m.mu.Lock()
+		t := m.tunnel
+		mine := m.gen == gen
+		m.mu.Unlock()
+		if t == nil || !mine {
+			return
+		}
+		if mbps, err := measureTunnelSpeed(speedSampleDuration); err != nil {
+			logx.Warnf("[wgtun] speed sample unavailable: %v", err)
+		} else {
+			logx.Infof("[wgtun] speed: %.1f Mbps through %s", mbps, ep)
+		}
+	}()
+}
+
 // measureTunnelSpeed verifies the data plane through the just-installed
 // default route and reports the download rate. It fetches a fixed-size probe
 // from speed.cloudflare.com (WARP's own speed host, reachable through the
@@ -546,6 +648,10 @@ func measureTunnelSpeed(window time.Duration) (float64, error) {
 	var total int64
 	// Clock starts at the FIRST BODY byte: everything before it (DNS, TCP, TLS,
 	// headers) is setup, not throughput, and counting it understated the link.
+	// The loop ends when the sample duration elapses (steady-state window), or
+	// the body ends, or the whole-request deadline (window) closes — whichever
+	// comes first. There is deliberately no early "3s is enough" break: that
+	// was the slow-start trap that read 2.6 Mbps on a 63 Mbps link.
 	start := time.Now()
 	for {
 		n, err := resp.Body.Read(buf)
@@ -554,9 +660,6 @@ func measureTunnelSpeed(window time.Duration) (float64, error) {
 		}
 		total += int64(n)
 		if err != nil {
-			break
-		}
-		if elapsed := time.Since(start); elapsed > 3*time.Second && total > 200*1024 {
 			break
 		}
 		if time.Since(start) > window {
@@ -594,6 +697,11 @@ const speedSampleWindow = 15 * time.Second
 // MeasureSpeed samples the LIVE tunnel's download throughput and reports Mbps.
 // It is the exported form of measureTunnelSpeed, for the wgbench tool and for
 // anyone who needs a number after the connect has completed.
+//
+// CALIBRATION NOTE (2026-10-05): the effective sampling window changed today —
+// the hardcoded 3s early-break was removed, so a window of W now really
+// samples W (previously ~3s). Numbers from wgbench runs before 2026-10-05 are
+// NOT comparable to later ones at the same -window flag.
 func MeasureSpeed(window time.Duration) (float64, error) {
 	return measureTunnelSpeed(window)
 }
