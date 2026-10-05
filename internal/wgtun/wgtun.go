@@ -36,6 +36,7 @@
 package wgtun
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -346,6 +347,26 @@ func (t *tunnel) WaitHandshake(timeout time.Duration) error {
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("handshake did not complete within %v", timeout)
+}
+
+// waitHandshakeCtx is WaitHandshake with an interruption channel: it returns
+// ctx.Err() the moment ctx is cancelled. It exists so Stop() can abort a
+// failover mid-handshake — the plain WaitHandshake sits out its full timeout
+// while the caller (failover) holds m.mu, which is what left the power button
+// dead for as long as the failover loop ran (2026-10-05).
+func (t *tunnel) waitHandshakeCtx(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if s, err := t.dev.IpcGet(); err == nil && hasHandshake(s) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 	return fmt.Errorf("handshake did not complete within %v", timeout)
 }

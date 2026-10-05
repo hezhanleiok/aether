@@ -95,6 +95,14 @@ func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 			if cur := a.VPN.State().Status; cur == vpn.StatusReconnecting {
 				a.VPN.SetNativeState(vpn.StatusConnected, s.Mode, "")
 			}
+		case wgtun.StateFailed:
+			// Failover gave up: wgtun already tore the dead session down
+			// (routes/DNS reverted, physical network restored), so this only
+			// moves the UI to an explicit signal instead of spinning
+			// "Reconnecting" forever on a network that is down.
+			if cur := a.VPN.State().Status; cur == vpn.StatusReconnecting || cur == vpn.StatusConnected {
+				a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, "网络不通，请手动重连")
+			}
 		}
 	}
 	if err := m.Start(ctx, cfg, nil); err != nil {

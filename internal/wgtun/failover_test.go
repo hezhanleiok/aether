@@ -3,9 +3,11 @@
 package wgtun
 
 import (
+	"context"
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestPortVariants covers the cheapest failover move: the same host on the
@@ -90,5 +92,42 @@ func TestParseLastHandshakeSec(t *testing.T) {
 		if got := parseLastHandshakeSec(c.uapi); got != c.want {
 			t.Fatalf("%s: parseLastHandshakeSec = %d, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+// TestProbeOnceCtxCancelled pins the interruptible probe (2026-10-05 fix): a
+// stop context that is already cancelled must fail the probe immediately — no
+// network round-trip, no waiting out the timeout. This is the seam Stop()
+// uses to cut a running failover short instead of queueing behind its m.mu.
+func TestProbeOnceCtxCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := probeOnceCtx(ctx, 5*time.Second); err == nil {
+		t.Fatal("probeOnceCtx with a cancelled ctx must fail immediately")
+	}
+}
+
+// TestStopSetsStopReq pins the pre-lock half of the fix: Stop() must set the
+// stop flag (on every path, including the instant no-op teardown), because a
+// failover that is holding m.mu right now can only observe the stop through
+// this flag — the lock itself will not be reached until the failover exits.
+func TestStopSetsStopReq(t *testing.T) {
+	m := &Manager{}
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop on an idle Manager: %v", err)
+	}
+	if !m.stopReq.Load() {
+		t.Fatal("Stop must set stopReq (the flag that interrupts an in-flight failover)")
+	}
+}
+
+// TestFailoverAbortsWhenStopRequested proves the failover entry check: with
+// stopReq already set (Stop() queued on m.mu), failover must return false
+// without touching the (nil) tunnel or routes.
+func TestFailoverAbortsWhenStopRequested(t *testing.T) {
+	m := &Manager{}
+	m.stopReq.Store(true)
+	if m.failover() {
+		t.Fatal("failover with stop requested must return false immediately")
 	}
 }

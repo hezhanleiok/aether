@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aethergui/aethergui/internal/logx"
@@ -47,6 +48,17 @@ type Manager struct {
 	// healthStop closes the health-monitor goroutine of the live session.
 	healthStop chan struct{}
 
+	// stopReq is the "stop requested" flag. Stop() sets it BEFORE taking m.mu:
+	// a failover in flight holds m.mu for its whole run (up to ~80s =
+	// 2 rounds x 4 candidates x (6s handshake + 4s probe)), and a Stop that
+	// merely queued behind the lock left the power button dead for as long as
+	// the failover loop ran (2026-10-05: 3 minutes, /api/cancel hung inside
+	// Disconnect -> Stop -> m.mu.Lock). The flag makes the running failover
+	// exit at its next check point — including mid-handshake and mid-probe,
+	// both of which take the derived stop context — and release the lock.
+	// Start resets it for the new session.
+	stopReq atomic.Bool
+
 	// link is the physical-link metric guard for the CURRENT session. It is
 	// restored in Stop, not only in Start: the drift it protects against was
 	// observed to happen WHILE the tunnel is up (WLAN IPv4 left with
@@ -77,6 +89,9 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	// notified=StateReconnecting (or never reset it after a failed Start), and
 	// letting that leak would suppress the new session's first transition.
 	m.notified = ""
+	// Re-arm the stop flag: Stop() of a previous session set it, and a fresh
+	// session's failover must not be born already-aborted.
+	m.stopReq.Store(false)
 	m.gen++
 
 	// Self-check (connect-time): recover any route/metric/DNS left behind by a
@@ -276,6 +291,11 @@ const (
 	// StateReconnecting: the endpoint died and failover is in progress. The
 	// monitor keeps running, so a later round can still recover.
 	StateReconnecting = "reconnecting"
+	// StateFailed: failover gave up after failoverGiveUpRounds consecutive
+	// full rounds found no usable endpoint. The session is torn down (routes/
+	// DNS reverted, physical network restored) and the user must reconnect
+	// manually when the network is back.
+	StateFailed = "failed"
 )
 
 // notifyState pushes a session-state transition through OnState. mu is held
@@ -330,6 +350,18 @@ const (
 	// the endpoint dead for now. The monitor keeps running, so a later round
 	// can still recover if the network comes back.
 	failoverRounds = 2
+	// failoverGiveUpRounds is how many consecutive FAILURES of a full failover
+	// the monitor tolerates before declaring the network unreachable. Until
+	// 2026-10-05 it retried forever, which meant a dead network produced an
+	// endless Reconnecting loop — with the default route still hijacked into
+	// the dead tunnel, i.e. the whole machine offline with no signal to the
+	// user. On give-up the session is torn down and StateFailed is pushed.
+	failoverGiveUpRounds = 3
+	// pollStopInterval is how often the failover's stop-watcher goroutine
+	// samples stopReq. It bounds how long after Stop() sets the flag a
+	// mid-handshake / mid-probe wait can still last (the underlying HTTP
+	// request and handshake poll are cancelled via the derived context).
+	pollStopInterval = 50 * time.Millisecond
 )
 
 // startHealthMonitor watches the live session and fails over when it dies.
@@ -341,12 +373,23 @@ func (m *Manager) startHealthMonitor() {
 		ticker := time.NewTicker(healthInterval)
 		defer ticker.Stop()
 		streak := 0
+		// failStreak counts consecutive FAILED full failovers. A successful
+		// failover clears it; reaching failoverGiveUpRounds tears the dead
+		// session down instead of retrying forever.
+		failStreak := 0
 		for {
 			select {
 			case <-stop:
 				return
 			case <-ticker.C:
 				if !m.Running() {
+					return
+				}
+				// Stop was requested while we were between ticks: exit
+				// without starting (let alone counting) another round —
+				// Stop is about to close healthStop anyway, but it can only
+				// do that once it gets m.mu, which it is waiting on us for.
+				if m.stopReq.Load() {
 					return
 				}
 				if m.healthy() {
@@ -380,11 +423,35 @@ func (m *Manager) startHealthMonitor() {
 					// State push (failover SUCCESS): back to connected.
 					m.notifyState(StateConnected)
 					streak = 0
+					failStreak = 0
+					continue
 				}
-				// Failover exhausted: stay in StateReconnecting and keep monitoring;
-				// the next tick clears notified again, so the push re-fires until the
-				// session recovers or the user disconnects. A later round can still
-				// recover if the network comes back.
+				// An ABORTED failover (Stop requested mid-round) must not count
+				// toward the give-up budget: the session is being torn down and
+				// this goroutine is about to be closed by that same Stop.
+				if m.stopReq.Load() {
+					return
+				}
+				failStreak++
+				if failStreak < failoverGiveUpRounds {
+					logx.Warnf("[wgtun] failover round %d/%d found no usable endpoint", failStreak, failoverGiveUpRounds)
+					continue
+				}
+				// GIVE UP: the network (not the endpoint) is unreachable. The
+				// default route still points into the dead tunnel, so leaving
+				// the session "up" would keep the whole machine offline while
+				// the UI spins Reconnecting forever (2026-10-05: 3 minutes of
+				// 8-candidate rounds, then more of the same). Tear the session
+				// down — routes/DNS revert, the physical network works again —
+				// and tell the user to reconnect manually when the network is
+				// back. notifyState must run BEFORE Stop: Stop nils the tunnel,
+				// and notifyState suppresses pushes for a session that is down.
+				logx.Errorf("[wgtun] failover gave up after %d consecutive rounds: network unreachable, tearing down the session", failStreak)
+				m.notifyState(StateFailed)
+				if err := m.Stop(); err != nil {
+					logx.Warnf("[wgtun] post-failover teardown: %v", err)
+				}
+				return
 			}
 		}
 	}()
@@ -421,6 +488,31 @@ func (m *Manager) failover() bool {
 	if m.tunnel == nil || m.routes == nil {
 		return false
 	}
+	// Interruption seam (2026-10-05 unresponsive-power-button fix): Stop()
+	// sets stopReq BEFORE taking m.mu, so a failover holding the lock must
+	// observe the flag and exit instead of making Stop queue for the whole
+	// batch. Both long waits below (handshake, data-plane probe) run under
+	// stopCtx, which the watcher goroutine cancels within pollStopInterval of
+	// the flag being set; the loop also checks the flag at every candidate
+	// boundary. An interrupted failover returns false WITHOUT evicting the
+	// candidate it was on — being interrupted by the user is not evidence the
+	// endpoint is dead.
+	if m.stopReq.Load() {
+		logx.Infof("[wgtun] failover aborted: stop already requested")
+		return false
+	}
+	stopCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for !m.stopReq.Load() {
+			select {
+			case <-stopCtx.Done():
+				return
+			case <-time.After(pollStopInterval):
+			}
+		}
+		cancel()
+	}()
 
 	skip := map[string]bool{}
 	tried := 0
@@ -430,6 +522,10 @@ func (m *Manager) failover() bool {
 			break
 		}
 		for _, next := range cands {
+			if m.stopReq.Load() {
+				logx.Infof("[wgtun] failover aborted after %d candidates: stop requested", tried)
+				return false
+			}
 			skip[next] = true
 			tried++
 			logx.Infof("[wgtun] failover %s -> %s", m.current, next)
@@ -461,7 +557,11 @@ func (m *Manager) failover() bool {
 				cache.save()
 				continue
 			}
-			if err := m.tunnel.WaitHandshake(failoverHandshakeTimeout); err != nil {
+			if err := m.tunnel.waitHandshakeCtx(stopCtx, failoverHandshakeTimeout); err != nil {
+				if m.stopReq.Load() {
+					logx.Infof("[wgtun] failover interrupted at %s: stop requested", next)
+					return false
+				}
 				logx.Warnf("[wgtun] failover: handshake %s: %v", next, err)
 				_ = m.routes.dropEndpointRoute(next)
 				// Judged dead, not just unlucky: this candidate got a real
@@ -474,7 +574,11 @@ func (m *Manager) failover() bool {
 				cache.save()
 				continue
 			}
-			if err := probeOnce(healthProbeTimeout); err != nil {
+			if err := probeOnceCtx(stopCtx, healthProbeTimeout); err != nil {
+				if m.stopReq.Load() {
+					logx.Infof("[wgtun] failover interrupted at %s: stop requested", next)
+					return false
+				}
 				logx.Warnf("[wgtun] failover: data plane via %s: %v", next, err)
 				_ = m.routes.dropEndpointRoute(next)
 				// Judged dead, not just unlucky: this candidate got a real
@@ -584,6 +688,13 @@ func probeTunnelDataPlane(timeout time.Duration) error {
 // monitor and by failover verification, where a slow retry loop would cost more
 // than the reaction budget.
 func probeOnce(timeout time.Duration) error {
+	return probeOnceCtx(context.Background(), timeout)
+}
+
+// probeOnceCtx is the ctx-aware form of probeOnce: the request is built with
+// ctx, so an interrupted failover's stop context cancels the probe in flight
+// instead of holding m.mu for the full timeout.
+func probeOnceCtx(ctx context.Context, timeout time.Duration) error {
 	client := &http.Client{
 		Timeout:   timeout,
 		Transport: &http.Transport{Proxy: nil},
@@ -591,7 +702,19 @@ func probeOnce(timeout time.Duration) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	return probeOnceWith(client, timeout)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://1.1.1.1/", nil)
+	if err != nil {
+		return fmt.Errorf("data-plane probe: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("data-plane probe: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode <= 0 {
+		return fmt.Errorf("data-plane probe: no HTTP response")
+	}
+	return nil
 }
 
 // probeOnceWith performs one reachability request with a prepared client.
@@ -780,6 +903,13 @@ const revertTimeout = 5 * time.Second
 
 // Stop reverts routes/DNS and tears the adapter down. It is idempotent.
 func (m *Manager) Stop() error {
+	// Request the stop BEFORE taking m.mu (2026-10-05): a failover in flight
+	// holds m.mu for its whole candidate batch (up to ~80s), and this function
+	// queuing on the lock is exactly what made the power button hang for as
+	// long as the failover loop ran. The flag unwinds the running failover at
+	// its next check point — mid-handshake included — and releases the lock;
+	// only then do we take it and tear down for real. Start resets the flag.
+	m.stopReq.Store(true)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Stop the health monitor FIRST: otherwise it can start a failover against a
