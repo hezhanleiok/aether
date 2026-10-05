@@ -131,3 +131,30 @@ func TestFailoverAbortsWhenStopRequested(t *testing.T) {
 		t.Fatal("failover with stop requested must return false immediately")
 	}
 }
+
+// TestHealLinkMetric pins the physical-link metric residue heal (2026-10-06):
+// "automatic disabled + metric 0" — the state an interrupted run leaves behind,
+// and one that BEATS the tunnel's metric 1, so the physical link keeps the
+// default route — must be restored to automatic. Every other value, including a
+// hand-set metric with automatic disabled, is preserved as captured.
+func TestHealLinkMetric(t *testing.T) {
+	cases := []struct {
+		name       string
+		metric     uint32
+		auto       uint8
+		wantMetric uint32
+		wantAuto   uint8
+	}{
+		{"residue: auto off, metric 0", 0, 0, 0, 1},
+		{"healthy automatic", 25, 1, 25, 1},
+		{"hand-set metric, auto off", 10, 0, 10, 0},
+		{"metric 0 but automatic on", 0, 1, 0, 1},
+	}
+	for _, c := range cases {
+		gotMetric, gotAuto := healLinkMetric(c.metric, c.auto)
+		if gotMetric != c.wantMetric || gotAuto != c.wantAuto {
+			t.Fatalf("%s: healLinkMetric(%d, %d) = (%d, %d), want (%d, %d)",
+				c.name, c.metric, c.auto, gotMetric, gotAuto, c.wantMetric, c.wantAuto)
+		}
+	}
+}

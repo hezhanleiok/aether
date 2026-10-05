@@ -44,6 +44,15 @@ type routeManager struct {
 	// back. Index 0 = IPv4, 1 = IPv6.
 	ifMetric [2]ifMetricState
 
+	// phys is the physical-link default route captured BEFORE the takeover,
+	// per family (0 = IPv4, 1 = IPv6). Once ApplyDefaultRoutes has run the
+	// tunnel owns 0.0.0.0/0 (or ::/0), so a fresh defaultRoute() lookup
+	// returns the TUNNEL — pinning an endpoint host route on it sends the
+	// handshake into its own tunnel: an instant loop and no handshake ever
+	// completes. Every endpoint route added or dropped after the flip must
+	// therefore use this captured row instead of a live lookup.
+	phys [2]physRouteState
+
 	// linkMetric is the physical-link snapshot taken when this routeManager was
 	// created (i.e. before its first mutation). It is persisted by writeState so
 	// a hard kill can restore it on the next launch.
@@ -59,11 +68,48 @@ type ifMetricState struct {
 	auto   uint8
 }
 
+// physRouteState is the physical-link default route captured before the
+// takeover (see routeManager.phys).
+type physRouteState struct {
+	have bool
+	row  windows.MibIpForwardRow2
+}
+
 // newRouteManager captures the adapter LUID and the DNS servers to install. It
 // also snapshots the physical link's metric right away, so writeState (which
-// runs before the first mutation) can persist it for crash recovery.
+// runs before the first mutation) can persist it for crash recovery, and
+// records the physical default route per family — after the flip a live lookup
+// would return the tunnel itself.
 func newRouteManager(luid uint64, dns []string) *routeManager {
-	return &routeManager{luid: luid, dns: dns, linkMetric: snapshotLinkMetrics()}
+	m := &routeManager{luid: luid, dns: dns, linkMetric: snapshotLinkMetrics()}
+	for i, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
+		r, err := defaultRoute(family)
+		if err != nil {
+			continue
+		}
+		// Residue guard: if an earlier unclean session left ITS tunnel holding
+		// the default route, that is not the physical link — do not capture it,
+		// or every endpoint route would be pinned on a dead adapter.
+		if r.InterfaceLuid == luid {
+			continue
+		}
+		m.phys[i] = physRouteState{have: true, row: r}
+	}
+	return m
+}
+
+// physRoute returns the physical-link default route for a family, preferring
+// the pre-takeover capture. Falls back to a live lookup only when that family
+// had no default route to capture (nothing was pinned on it either).
+func (m *routeManager) physRoute(family uint16) (windows.MibIpForwardRow2, error) {
+	i := 0
+	if family == windows.AF_INET6 {
+		i = 1
+	}
+	if !m.phys[i].have {
+		return defaultRoute(family)
+	}
+	return m.phys[i].row, nil
 }
 
 // ApplyEndpointRoute performs the pre-handshake steps: it persists the
@@ -72,9 +118,10 @@ func newRouteManager(luid uint64, dns []string) *routeManager {
 // route, so handshake packets keep a real path. Call right after Up(); wait for
 // the handshake; then ApplyDefaultRoutes, then ApplyDNS.
 func (m *routeManager) ApplyEndpointRoute(endpoint string) error {
-	// Physical default route, captured before any change. Also proves the
-	// family actually has connectivity to pin the endpoint onto.
-	phys, err := defaultRoute(endpointFamily(endpoint))
+	// Physical default route, captured before any change (and before the
+	// default route flips, after which a live lookup would return the tunnel).
+	// Also proves the family actually has connectivity to pin the endpoint onto.
+	phys, err := m.physRoute(endpointFamily(endpoint))
 	if err != nil {
 		return fmt.Errorf("wgtun: no default route to pin %s on: %w", endpoint, err)
 	}
@@ -125,7 +172,10 @@ func (m *routeManager) addEndpointRoute(endpoint string, phys windows.MibIpForwa
 // installed, a failed attempt cannot strand the session — the old endpoint
 // keeps its route until the new one has actually handshaken.
 func (m *routeManager) addEndpointRouteFor(endpoint string) error {
-	phys, err := defaultRoute(endpointFamily(endpoint))
+	// The PHYSICAL link, not the current default route: after the takeover the
+	// default route is the tunnel, and pinning the candidate on it would loop
+	// its handshake back into itself.
+	phys, err := m.physRoute(endpointFamily(endpoint))
 	if err != nil {
 		return fmt.Errorf("wgtun: no default route to pin %s on: %w", endpoint, err)
 	}
@@ -140,7 +190,7 @@ func (m *routeManager) addEndpointRouteFor(endpoint string) error {
 // use (the previous endpoint after a successful failover, or a candidate whose
 // handshake failed).
 func (m *routeManager) dropEndpointRoute(endpoint string) error {
-	phys, err := defaultRoute(endpointFamily(endpoint))
+	phys, err := m.physRoute(endpointFamily(endpoint))
 	row, rerr := m.endpointRow(endpoint, phys)
 	if rerr != nil {
 		return rerr
@@ -238,6 +288,80 @@ func (m *routeManager) applyHostRouteOnly(endpoint string) error {
 		return err
 	}
 	return nil
+}
+
+// linkPressMetric is the interface metric the PHYSICAL link is pushed to while
+// the tunnel is up. Effective route metric = interface metric + route metric,
+// so the tunnel (interface metric 1) only wins outright if the physical link is
+// clearly above it; 100 is far above every value Windows assigns automatically
+// (25-75) and leaves headroom for a hand-set metric.
+//
+// Why this exists (2026-10-06): lowering the TUNNEL's metric to 1 alone is not
+// a takeover. This machine's WLAN IPv4 was left at AutomaticMetric=Disabled,
+// InterfaceMetric=0 (residue from an interrupted run), and 0 BEATS 1 — the
+// physical link kept 0.0.0.0/0, so a "connected" tunnel carried nothing: DNS
+// still went to the router, curl timed out. Pressing the physical link up makes
+// the result independent of whatever state the link was left in.
+const linkPressMetric = 100
+
+// raiseLinkMetrics pushes the physical link's interface metric up for both
+// families, so the tunnel's default route wins the election instead of tying
+// with (or losing to) the physical NIC. Best-effort per family: a family with
+// no captured link is skipped, and a failure is reported rather than fatal —
+// the takeover gate right after this is what decides whether the connect
+// stands.
+func (m *routeManager) raiseLinkMetrics(metric uint32) error {
+	var errs []error
+	for _, e := range m.linkMetric {
+		if e.LUID == m.luid {
+			continue // never touch our own adapter
+		}
+		var cur windows.MibIpInterfaceRow
+		initializeIpInterfaceEntry(&cur)
+		cur.Family = e.Family
+		cur.InterfaceLuid = e.LUID
+		if err := revertGetMetric(&cur); err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("read link metric luid=%d family=%d: %w", e.LUID, e.Family, err))
+			continue
+		}
+		var set windows.MibIpInterfaceRow
+		initializeIpInterfaceEntry(&set)
+		set.Family = e.Family
+		set.InterfaceLuid = e.LUID
+		set.UseAutomaticMetric = 0
+		set.Metric = metric
+		if err := revertSetMetric(&set); err != nil {
+			errs = append(errs, fmt.Errorf("raise link metric luid=%d family=%d: %w", e.LUID, e.Family, err))
+			continue
+		}
+		logx.Infof("[wgtun] link metric raised: luid=%d family=%d metric %d->%d (automatic %d->0)",
+			e.LUID, e.Family, cur.Metric, metric, cur.UseAutomaticMetric)
+	}
+	return errors.Join(errs...)
+}
+
+// verifyTakeover proves the tunnel actually OWNS the default route after the
+// flip. Without it a failed takeover is invisible: the UI shows Connected while
+// every packet still leaves through the physical NIC (exactly the 2026-10-06
+// report). IPv4 is fatal; IPv6 is best-effort because ::/0 is only installed
+// when the machine had a v6 default route to begin with.
+func (m *routeManager) verifyTakeover(luid uint64) error {
+	r, err := defaultRoute(windows.AF_INET)
+	if err != nil {
+		return fmt.Errorf("wgtun: no IPv4 default route after takeover: %w", err)
+	}
+	if r.InterfaceLuid == luid {
+		return nil
+	}
+	if ifm, ok := interfaceMetric(r.InterfaceLuid, windows.AF_INET); ok {
+		return fmt.Errorf("wgtun: takeover failed: default route still on luid=%d (interface metric %d + route metric %d), tunnel luid=%d",
+			r.InterfaceLuid, ifm, r.Metric, luid)
+	}
+	return fmt.Errorf("wgtun: takeover failed: default route still on luid=%d (route metric %d), tunnel luid=%d",
+		r.InterfaceLuid, r.Metric, luid)
 }
 
 // ApplyDefaultRoutes flips the default route into the tunnel. It MUST only be
@@ -394,6 +518,10 @@ func (m *routeManager) applyDNS() error {
 	if err := k.SetStringValue("NameServer", strings.Join(m.dns, ",")); err != nil {
 		return err
 	}
+	// Logged on purpose: "DNS not taken over" is otherwise invisible — what the
+	// resolver uses depends on adapter priority, so the only evidence that we
+	// set it (and what it replaced) is this line.
+	logx.Infof("[wgtun] DNS on tunnel adapter %s: %s (was %q)", guidString(guid), strings.Join(m.dns, ","), m.oldDNS)
 	// Flush the resolver cache so the new DNS takes effect immediately instead
 	// of on the cache TTL.
 	if !flushResolverCache() {
@@ -584,6 +712,23 @@ type linkMetricJSON struct {
 	Auto   uint8  `json:"auto"`
 }
 
+// healLinkMetric maps a captured physical-link metric onto the value the
+// restore path should write back. It is a pure function so the rule is testable
+// offline (the adapters it normally guards are not).
+//
+// "AutomaticMetric disabled + metric 0" is not a value a user can set
+// (Windows' own UI starts at 1) and it is exactly what an interrupted run left
+// on this machine's WLAN (2026-10-06): metric 0 BEATS the tunnel's metric 1, so
+// the physical link kept the default route and a "connected" tunnel carried
+// nothing. Those entries are restored to AUTOMATIC instead of faithfully being
+// written back forever; anything else is preserved as captured.
+func healLinkMetric(metric uint32, auto uint8) (uint32, uint8) {
+	if auto == 0 && metric == 0 {
+		return 0, 1 // 0 with automatic metric = "let Windows compute"
+	}
+	return metric, auto
+}
+
 // snapshotLinkMetrics captures the per-family metric of the physical adapter
 // that currently carries the default route, for both address families. A family
 // with no default route (or no interface entry) is skipped — there is nothing
@@ -608,11 +753,16 @@ func snapshotLinkMetrics() []linkMetricJSON {
 			continue
 		}
 		seen[key] = true
+		metric, auto := healLinkMetric(row.Metric, row.UseAutomaticMetric)
+		if row.UseAutomaticMetric == 0 && row.Metric == 0 {
+			logx.Warnf("[wgtun] link metric residue on luid=%d family=%d (automatic disabled, metric 0); restoring it to automatic",
+				r.InterfaceLuid, family)
+		}
 		out = append(out, linkMetricJSON{
 			LUID:   r.InterfaceLuid,
 			Family: family,
-			Metric: row.Metric,
-			Auto:   row.UseAutomaticMetric,
+			Metric: metric,
+			Auto:   auto,
 		})
 	}
 	return out

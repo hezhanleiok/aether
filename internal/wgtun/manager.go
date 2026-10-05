@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aethergui/aethergui/internal/logx"
+	"golang.org/x/sys/windows"
 )
 
 // Manager owns a running native WireGuard session end to end: the wintun
@@ -104,15 +105,25 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	}
 
 	// Physical-link metric guard: snapshot the adapter that carries the default
-	// route (WLAN/Ethernet, both families) and restore it on EVERY exit path —
-	// cancel, error, or success. The probe below is stateless UDP and never
-	// touches a metric, but the 2026-10-04 incident (WLAN metric left altered
-	// after an interrupted probe, whole machine black-holed) must be impossible
-	// by construction, not merely unlikely. Restore is a no-op while the link
-	// is healthy; it only writes when the value actually drifted.
+	// route (WLAN/Ethernet, both families) and restore it on every EXIT path —
+	// cancel or error. The probe below is stateless UDP and never touches a
+	// metric, but the 2026-10-04 incident (WLAN metric left altered after an
+	// interrupted probe, whole machine black-holed) must be impossible by
+	// construction, not merely unlikely. Restore is a no-op while the link is
+	// healthy; it only writes when the value actually drifted.
+	//
+	// SUCCESS deliberately does NOT restore (2026-10-06): the live session now
+	// includes a deliberate press of the physical link's metric (see
+	// raiseLinkMetrics), and undoing it here would hand the default route
+	// straight back to the physical NIC the moment Start returned. Stop owns
+	// that restore for a live session; it also restores m.link.
 	link := newLinkMetricGuard()
 	m.link = link // also restored by Stop, see the field's note
+	linkLive := false
 	defer func() {
+		if linkLive {
+			return
+		}
 		if err := link.restore(); err != nil {
 			logx.Errorf("[wgtun] link metric guard: %v", err)
 		}
@@ -203,13 +214,42 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 		_ = t.Down()
 		return err
 	}
+	// Takeover, part 1 of 3: push the PHYSICAL link's interface metric up
+	// (AutomaticMetric disabled, metric 100) so the tunnel's metric-1 default
+	// route wins outright. Lowering the tunnel alone is NOT a takeover —
+	// effective metric is interface + route, and a physical link sitting at
+	// metric 0 (residue seen on this machine 2026-10-06) beats the tunnel's 1.
+	// The endpoint's /32 host route is unaffected: longest prefix wins
+	// regardless of metric, so the handshake still leaves via the physical NIC.
+	if err := rm.raiseLinkMetrics(linkPressMetric); err != nil {
+		// Reported, not fatal: the gate below is what decides whether the
+		// takeover actually happened.
+		logx.Errorf("[wgtun] raising physical-link metric: %v", err)
+	}
 	if err := rm.ApplyDefaultRoutes(); err != nil {
 		_ = t.Down()
 		return err
 	}
+	// Takeover, part 2 of 3: DNS on the tunnel adapter (1.1.1.1 / 1.0.0.1 via
+	// its registry NameServer). Which server the resolver actually queries
+	// follows adapter priority, so this only takes effect once part 1 has made
+	// the tunnel adapter the preferred one — hence the order.
 	if err := rm.ApplyDNS(); err != nil {
 		_ = t.Down()
 		return err
+	}
+	// Takeover, part 3 of 3: prove it. A tunnel that is up but does not own
+	// 0.0.0.0/0 is the worst possible failure — the UI says Connected while
+	// every packet leaves through the physical NIC (2026-10-06: DNS still
+	// answered from the router, curl timed out). Fail loudly and revert
+	// instead. IPv6 is best-effort and only checked in the log.
+	if err := rm.verifyTakeover(t.luid()); err != nil {
+		_ = t.Down()
+		return fmt.Errorf("%w (reverted)", err)
+	}
+	if r, err := defaultRoute(windows.AF_INET6); err == nil && r.InterfaceLuid != t.luid() {
+		logx.Warnf("[wgtun] IPv6 default route still on luid=%d (tunnel luid=%d); IPv6 may not ride the tunnel",
+			r.InterfaceLuid, t.luid())
 	}
 
 	// Data-plane gate, through the now-live tunnel. The handshake proves the
@@ -247,6 +287,9 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	}
 
 	keep = true
+	// The session is live: the pressed physical-link metric is now part of it,
+	// so Start's guard must not undo it here — Stop restores it (m.link).
+	linkLive = true
 
 	// The winning endpoint is already persisted by handshakeAcross, which owns
 	// attempt accounting (SuccessCount AND Attempts). Recording it again here
