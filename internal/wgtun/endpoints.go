@@ -321,7 +321,7 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 			live := filterLiveStrict(ctx, addrs, fastPathProbeWorkers, nil)
 			if len(live) > 0 {
 				logx.Infof("[wgtun] fast path: %d/%d cached/seed endpoints answered the liveness probe", len(live), len(quick))
-				return live, nil
+				return orderHandshakeCandidates(live), nil
 			}
 			logx.Infof("[wgtun] fast path: none of the %d cached/seed endpoints answered; falling through to the full sweep", len(quick))
 		}
@@ -335,10 +335,50 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 		return nil, fmt.Errorf("no endpoint answered the liveness probe (checked %d candidates)", len(candidates))
 	}
 	logx.Infof("[wgtun] %d/%d endpoints answered the liveness probe", len(live), len(candidates))
+	// Order BEFORE truncating: the top-N must be the N most likely to handshake,
+	// not merely the N fastest to answer a probe.
+	live = orderHandshakeCandidates(live)
 	if len(live) > maxHandshakeCandidates {
 		live = live[:maxHandshakeCandidates]
 	}
 	return live, nil
+}
+
+// orderHandshakeCandidates ranks candidate endpoints for the real-tunnel
+// handshake. The UDP liveness probe says an endpoint ANSWERS; it says nothing
+// about whether it will accept THIS identity's handshake — on 2026-10-05 every
+// one of 12 probe-live candidates was tried, the first 8 timed out, and only
+// the 9th (a historically proven one) connected. So historical handshake
+// outcome leads, and the probe's own measurements (speed, then latency) only
+// break ties, followed by the cached RTT. Endpoints absent from the cache get
+// the neutral prior via a zero-value entry, and Addr is the final tie-break so
+// the order is deterministic (stable logs, testable).
+func orderHandshakeCandidates(eps []liveEndpoint) []liveEndpoint {
+	if len(eps) < 2 {
+		return eps
+	}
+	cache := loadCache()
+	hist := make(map[string]endpointEntry, len(cache.Endpoints))
+	for _, e := range cache.Endpoints {
+		hist[e.Addr] = e
+	}
+	sort.Slice(eps, func(i, j int) bool {
+		hi, hj := hist[eps[i].Addr], hist[eps[j].Addr]
+		if ri, rj := hi.successRate(), hj.successRate(); ri != rj {
+			return ri > rj
+		}
+		if eps[i].Speed != eps[j].Speed {
+			return eps[i].Speed > eps[j].Speed
+		}
+		if eps[i].Latency != eps[j].Latency {
+			return eps[i].Latency < eps[j].Latency
+		}
+		if hi.LastRttMs != hj.LastRttMs {
+			return hi.LastRttMs < hj.LastRttMs
+		}
+		return eps[i].Addr < eps[j].Addr
+	})
+	return eps
 }
 
 // filterLiveStrict screens the candidate pool with the strict UDP liveness probe,

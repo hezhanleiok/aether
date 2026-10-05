@@ -25,6 +25,12 @@ type endpointEntry struct {
 	SuccessCount int       `json:"successCount"`
 	FailCount    int       `json:"failCount"`
 	LastUsed     time.Time `json:"lastUsed"`
+	// Attempts: real-tunnel handshake attempts recorded against this endpoint,
+	// successes INCLUDED — the denominator of successRate. Added 2026-10-05, so
+	// entries written by older builds have no value here and JSON-decode to 0;
+	// successRate falls back to SuccessCount for those, i.e. "every attempt we
+	// know of worked", which is exactly what those builds recorded.
+	Attempts int `json:"attempts"`
 }
 
 const (
@@ -59,11 +65,78 @@ func (c *endpointCache) save() {
 	_ = os.WriteFile(cacheFilePath(), raw, 0o600)
 }
 
-// orderedAddrs returns cached endpoint addresses sorted by last handshake RTT
-// ascending — fastest first.
+// successRate is the Laplace-smoothed ratio of past handshake successes to
+// attempts: (successes+1)/(attempts+2).
+//
+// Smoothing is what makes this usable as a RANKING instead of a coin flip:
+//   - a never-tried endpoint scores 0.5 (neutral prior) rather than 0, so an
+//     unproven endpoint is not treated as a known-bad one;
+//   - an endpoint that succeeded once scores 0.67, not 1.0, so it cannot
+//     outrank an endpoint with a long good track record forever;
+//   - conversely one failure (0.33) demotes without banning.
+//
+// This metric exists because probe liveness and handshake success turned out to
+// be DIFFERENT things: on 2026-10-05 all 12 probe-live candidates were tried
+// and the first 8 timed out; the 9th — which had worked before — connected.
+// RTT cannot predict that, past outcomes can.
+func (e endpointEntry) successRate() float64 {
+	attempts := e.Attempts
+	if attempts < e.SuccessCount {
+		attempts = e.SuccessCount // legacy entry: only successes were recorded
+	}
+	return float64(e.SuccessCount+1) / float64(attempts+2)
+}
+
+// recordAttempt records the outcome of ONE real-tunnel handshake attempt. This
+// is what turns a slow connect into a fast next connect: without it, the 8
+// endpoints that just burned 14s each on their handshake timeouts get no pen
+// mark and are tried again, in the same order, forever.
+//
+// Failures are recorded but NEVER evicted here. Eviction is the failover path's
+// verdict on an endpoint judged DEAD; a connect-time failure only means "rank
+// this lower next time", because endpoints have transient bad phases (rate
+// limiting, congestion) and evicting them would throw away a good endpoint.
+func (c *endpointCache) recordAttempt(addr string, success bool) {
+	if addr == "" {
+		return
+	}
+	for i := range c.Endpoints {
+		if c.Endpoints[i].Addr != addr {
+			continue
+		}
+		c.Endpoints[i].Attempts++
+		c.Endpoints[i].LastUsed = time.Now()
+		if success {
+			c.Endpoints[i].SuccessCount++
+			c.Endpoints[i].FailCount = 0
+			// A just-proven endpoint carries no measured RTT (the handshake not
+			// the data path proves it), and 0 sorts it ahead on the tie-break.
+			c.Endpoints[i].LastRttMs = 0
+		}
+		return
+	}
+	e := endpointEntry{Addr: addr, Attempts: 1, LastUsed: time.Now()}
+	if success {
+		e.SuccessCount = 1
+	}
+	c.Endpoints = append(c.Endpoints, e)
+}
+
+// orderedAddrs returns cached endpoint addresses ordered for HANDSHAKE
+// PRIORITY: historically reliable first (successRate descending), with the last
+// known handshake RTT as the tie-break. It used to sort purely by RTT, which
+// put fast-answering-but-never-connecting endpoints ahead of ones that work.
 func (c endpointCache) orderedAddrs() []string {
 	es := append([]endpointEntry(nil), c.Endpoints...)
-	sort.Slice(es, func(i, j int) bool { return es[i].LastRttMs < es[j].LastRttMs })
+	sort.Slice(es, func(i, j int) bool {
+		if ri, rj := es[i].successRate(), es[j].successRate(); ri != rj {
+			return ri > rj
+		}
+		if es[i].LastRttMs != es[j].LastRttMs {
+			return es[i].LastRttMs < es[j].LastRttMs
+		}
+		return es[i].Addr < es[j].Addr // deterministic: logs + tests
+	})
 	out := make([]string, 0, len(es))
 	for _, e := range es {
 		out = append(out, e.Addr)

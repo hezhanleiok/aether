@@ -214,13 +214,12 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 
 	keep = true
 
-	// Persist the winning endpoint so the next connect tries it first (via the
-	// ordered cache in buildCandidates). RTT is left 0 — the dummy-device
-	// handshake does not measure it, and 0 sorts it to the front, which is what
-	// we want for a just-proven endpoint.
-	cache := loadCache()
-	cache.recordSuccess(connected, 0)
-	cache.save()
+	// The winning endpoint is already persisted by handshakeAcross, which owns
+	// attempt accounting (SuccessCount AND Attempts). Recording it again here
+	// would count one success without its attempt, inflating the success rate a
+	// little more on every connect until the number stopped being a ratio at
+	// all. It becomes the next connect's first candidate through the ordered
+	// cache in buildCandidates.
 
 	m.tunnel = t
 	m.routes = rm
@@ -595,6 +594,11 @@ func probeOnceWith(client *http.Client, timeout time.Duration) error {
 // no adapter rebuild. It returns the first endpoint whose handshake completed.
 func handshakeAcross(t *tunnel, cands []liveEndpoint, timeout time.Duration) (string, error) {
 	var lastErr error
+	// One load/save for the whole loop: each save rewrites endpoints.json, and
+	// iterating up to maxHandshakeCandidates endpoints must not become that many
+	// file round-trips.
+	cache := loadCache()
+	defer cache.save()
 	for i, c := range cands {
 		if i > 0 {
 			if err := t.setEndpoint(c.Addr); err != nil {
@@ -604,7 +608,13 @@ func handshakeAcross(t *tunnel, cands []liveEndpoint, timeout time.Duration) (st
 			}
 		}
 		logx.Infof("[wgtun] real-tunnel handshake %d/%d: %s", i+1, len(cands), c.Addr)
-		if err := t.WaitHandshake(timeout); err != nil {
+		err := t.WaitHandshake(timeout)
+		// Learn from EVERY attempt — including the failures. This is what makes
+		// the next connect start from endpoints that historically handshake
+		// instead of re-running the same 8 timeouts in the same order. Failures
+		// are recorded, not evicted: see endpointCache.recordAttempt.
+		cache.recordAttempt(c.Addr, err == nil)
+		if err != nil {
 			lastErr = err
 			continue
 		}
