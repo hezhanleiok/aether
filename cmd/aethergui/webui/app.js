@@ -455,7 +455,10 @@ function renderHome() {
 
   const connected = v.status === 'Connected';
   $('#ipLabel').textContent = connected ? tx('exitIP') : tx('localIP');
-  $('#ipVal').textContent = connected ? (v.exitIP || v.localIP || '—') : (v.localIP || '—');
+  // Connected: the exit IP is either known or unknown — falling back to the
+  // local IP here used to print the tunnel's own inner address (172.16.0.2)
+  // as the "exit IP", which is simply wrong.
+  $('#ipVal').textContent = connected ? (v.exitIP || '—') : (v.localIP || '—');
   $('#protoVal').textContent = v.protocolName;
   $('#latVal').textContent = v.latencyMs > 0 ? v.latencyMs + ' ms' : '—';
   $('#latVal').style.color = quality(v.latencyMs) === 1 ? 'var(--ok)' : '';

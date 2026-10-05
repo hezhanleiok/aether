@@ -34,6 +34,11 @@ func nativeWGResiduePresent() bool { return false }
 // path is the only path.
 func (a *App) useNativeWG(s config.Settings) bool { return false }
 
+// refreshNativeExitInfo is unreachable without the native backend (there is no
+// native session for it to describe); it exists so the shared exit-info path
+// compiles in both builds.
+func (a *App) refreshNativeExitInfo() {}
+
 func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 	a.connMu.Lock()
 	defer a.connMu.Unlock()

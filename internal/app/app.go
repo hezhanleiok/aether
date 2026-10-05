@@ -614,6 +614,21 @@ func (a *App) Reconnect() {
 // RefreshExitInfo queries the exit IP through the tunnel (SOCKS5) and updates
 // state + the connected node row. Failures never touch the connection.
 func (a *App) RefreshExitInfo() {
+	// NATIVE backend branch: there is no core and therefore no SOCKS listener,
+	// so the lookup below used to dial 127.0.0.1:<core port> and die with
+	// "connection refused" — exit IP / country / flag / latency stayed empty
+	// for the whole session and the UI fell back to showing the tunnel's own
+	// inner address (172.16.0.2) as the exit IP. The native tunnel owns the
+	// default route by the time we get here, so its exit info is fetched
+	// directly: a plain request already egresses through the tunnel.
+	a.connMu.Lock()
+	native := a.nativeSessionAlive()
+	a.connMu.Unlock()
+	if native {
+		a.refreshNativeExitInfo()
+		return
+	}
+
 	deadline := time.Now().Add(20 * time.Second)
 	// With the chained exit the probe has to go through Psiphon's own SOCKS
 	// listener: the Aether hop's port would happily answer while the final
@@ -681,7 +696,7 @@ func (a *App) RefreshExitInfo() {
 		return "", 0, lastErr
 	}
 
-	ipv4, latencyMs, ipErr := fetchExitIP()
+	ipv4, _, ipErr := fetchExitIP()
 	var ipv6 string
 	if ipv4 == "" && a.Settings.IPStack != config.IPv4Only {
 		ipv6 = node.IPv6Lookup(context.Background(), client)
@@ -720,12 +735,60 @@ func (a *App) RefreshExitInfo() {
 		logx.Warnf("[app] geo lookup failed: %v", err)
 		info = node.GeoInfo{IP: ip}
 	}
+	// Latency is a real round trip through the tunnel, NOT the duration of the
+	// HTTPS exit-IP lookup above. That number bundled DNS + TCP + TLS + the
+	// response on a cold tunnel and read 812 ms where the actual RTT was a
+	// fraction of it — and the UI labels the field "节点延迟". A TCP handshake
+	// is exactly one round trip, measured through the same SOCKS dialer, i.e.
+	// through the tunnel rather than the local line.
+	rttCtx, rttCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer rttCancel()
+	rttMs := measureRTT(rttCtx, dialer.(proxy.ContextDialer).DialContext, rttTarget, 3)
+	if rttMs <= 0 {
+		logx.Warnf("[app] tunnel RTT unavailable (latency stays unset)")
+	}
 	st := a.VPN.State()
-	a.VPN.SetExitInfo(info.IP, info.Country, info.Flag, latencyMs)
+	a.VPN.SetExitInfo(info.IP, info.Country, info.Flag, rttMs)
 	if gw := st.Gateway; gw != "" {
 		a.Pool.UpdateExit(gw, info.IP, info.Country, info.Flag)
 	}
 	logx.Infof("[app] exit: %s %s %s", info.Flag, info.Country, info.IP)
+}
+
+// rttTarget is the address the latency probe completes a TCP handshake with.
+// Cloudflare's anycast address answers from the edge the tunnel egresses
+// through, so the measured round trip is the tunnel's, not the local line's.
+const rttTarget = "1.1.1.1:443"
+
+// measureRTT returns the fastest of samples TCP handshakes to addr, in ms.
+// dial is the SOCKS dialer on the core path (traffic rides the tunnel) and nil
+// on the native path, where the tunnel already owns the default route. A TCP
+// handshake is one round trip, so unlike "time to finish an HTTPS request"
+// this is a genuine RTT and is what the UI's latency field now shows.
+// Returns 0 when every sample failed.
+func measureRTT(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error), addr string, samples int) int64 {
+	var best int64
+	for i := 0; i < samples; i++ {
+		start := time.Now()
+		var (
+			c   net.Conn
+			err error
+		)
+		if dial != nil {
+			c, err = dial(ctx, "tcp", addr)
+		} else {
+			d := &net.Dialer{Timeout: 5 * time.Second}
+			c, err = d.DialContext(ctx, "tcp", addr)
+		}
+		if err != nil {
+			continue
+		}
+		c.Close()
+		if ms := time.Since(start).Milliseconds(); best == 0 || ms < best {
+			best = ms
+		}
+	}
+	return best
 }
 
 func publicIP(client *http.Client, url string) string {

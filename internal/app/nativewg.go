@@ -5,13 +5,17 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aethergui/aethergui/internal/config"
 	"github.com/aethergui/aethergui/internal/logx"
+	"github.com/aethergui/aethergui/internal/node"
 	"github.com/aethergui/aethergui/internal/vpn"
 	"github.com/aethergui/aethergui/internal/wgtun"
 )
@@ -113,6 +117,88 @@ func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 	a.VPN.SetNativeState(vpn.StatusConnected, s.Mode, "")
 	logx.Infof("[app] native WireGuard up (endpoint %s, mtu %d)", m.Current(), cfg.MTU)
 	return nil
+}
+
+// refreshNativeExitInfo fills exit IP / country / flag / latency for the NATIVE
+// backend — the fields that used to stay empty because the shared
+// RefreshExitInfo only knows how to ask the core's SOCKS listener (which does
+// not exist here).
+//
+// It deliberately goes DIRECT (no SOCKS, no proxy): by the time this runs the
+// native tunnel has taken over the default route, so an ordinary HTTPS request
+// already egresses through the tunnel. That is also why Cloudflare's trace
+// endpoint is the first choice — one request yields the egress IP (ip=), the
+// egress country (loc=) and the datacentre (colo=).
+func (a *App) refreshNativeExitInfo() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Proxy: nil — the request must ride the system routing table, which the
+	// native backend just flipped onto the tunnel. A system proxy would detour
+	// it and report the wrong egress.
+	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil}}
+
+	ip, loc, colo := traceExit(ctx, client)
+	if ip == "" {
+		ip = publicIP(client, "https://api.ipify.org?format=json")
+	}
+	if ip == "" {
+		ip = publicIP(client, "https://api64.ipify.org?format=json")
+	}
+	if ip == "" {
+		logx.Warnf("[app] native exit IP lookup failed (connection stays up)")
+		return
+	}
+	rttMs := measureRTT(ctx, nil, rttTarget, 3)
+	country, flag := "", ""
+	// Geo enrichment is a plain lookup for an IP we already obtained through
+	// the tunnel, so it goes direct too.
+	if info, err := node.GeoLookup(ctx, client, ip); err == nil {
+		country, flag = info.Country, info.Flag
+	} else {
+		logx.Warnf("[app] native geo lookup failed: %v", err)
+	}
+	// ip-api can answer with Cloudflare's registration country for an anycast
+	// edge; the trace's loc= is where THIS traffic actually landed, so it wins
+	// as the fallback.
+	if country == "" && loc != "" {
+		country, flag = node.CountryName(loc), node.FlagFromCode(loc)
+	}
+	a.VPN.SetExitInfo(ip, country, flag, rttMs)
+	logx.Infof("[app] native exit: %s %s %s (rtt %d ms, colo %s)", flag, country, ip, rttMs, colo)
+}
+
+// traceExit reads Cloudflare's /cdn-cgi/trace and returns ip / loc / colo.
+// Empty strings on any failure: callers fall back to ipify + ip-api.
+func traceExit(ctx context.Context, client *http.Client) (ip, loc, colo string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.cloudflare.com/cdn-cgi/trace", nil)
+	if err != nil {
+		return "", "", ""
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		logx.Warnf("[app] native trace: %v", err)
+		return "", "", ""
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return "", "", ""
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(k) {
+		case "ip":
+			ip = strings.TrimSpace(v)
+		case "loc":
+			loc = strings.TrimSpace(v)
+		case "colo":
+			colo = strings.TrimSpace(v)
+		}
+	}
+	return ip, loc, colo
 }
 
 // disconnectNativeWG tears down the native tunnel and restores routes/DNS.
