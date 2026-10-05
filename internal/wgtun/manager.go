@@ -109,7 +109,14 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	// candidate. Concurrent dummy-device handshakes were dropped deliberately:
 	// they completed handshakes the real tunnel could not reproduce, and their
 	// devices competed with it for the same UDP 5-tuple/Cloudflare session.
-	cands, err := probeCandidates(ctx, cfg, "", false, onPhase)
+	// Out-of-pool cache sweep, at most once per pruneInterval: cached addresses
+	// this build's pool can no longer generate get probed on every connect and
+	// can never be proposed by a sweep, so they are pure dead weight.
+	if removed, ran := pruneStaleCache(cfg.Endpoint); ran && removed > 0 {
+		logx.Infof("[wgtun] dropped %d cached endpoints the current pool no longer generates", removed)
+	}
+
+	cands, fromSweep, err := probeCandidates(ctx, cfg, "", false, onPhase)
 	if err != nil {
 		return err
 	}
@@ -136,10 +143,22 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	// Cached endpoints get a short deadline (6s covers WireGuard's 5s retransmit
 	// plus a slow RTT): a stale cache entry should fail fast so the sweep starts
 	// sooner. Swept endpoints are known-live, so they get the full deadline.
-	connected, err := handshakeAcross(t, cands, 6*time.Second)
+	//
+	// fromSweep — not the call site — decides which one applies: when the fast
+	// path finds no survivors, probeCandidates falls through and runs the sweep
+	// INTERNALLY, so its results are swept candidates even though this is the
+	// "fast path" call. Passing them the 6s deadline meant for stale cache
+	// entries was silently killing endpoints that only needed WireGuard's 5s
+	// retransmit to land (observed 2026-10-05: three swept candidates each
+	// failed at exactly 6s, the fourth connected).
+	deadline := 6 * time.Second
+	if fromSweep {
+		deadline = handshakeTimeout
+	}
+	connected, err := handshakeAcross(t, cands, deadline)
 	if err != nil && ctx.Err() == nil {
 		logx.Infof("[wgtun] cached/seed candidates all failed (%v); running full sweep", err)
-		swept, serr := probeCandidates(ctx, cfg, "", true, onPhase)
+		swept, _, serr := probeCandidates(ctx, cfg, "", true, onPhase)
 		if serr == nil {
 			connected, err = handshakeAcross(t, swept, handshakeTimeout)
 		}

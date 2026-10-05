@@ -19,7 +19,7 @@ func TestProbeCandidatesCancel(t *testing.T) {
 	cancel() // pre-cancel: simulates a cancel fired before/while probing
 
 	start := time.Now()
-	_, err := probeCandidates(ctx, Config{}, "", false, nil)
+	_, _, err := probeCandidates(ctx, Config{}, "", false, nil)
 	elapsed := time.Since(start)
 
 	if err == nil {

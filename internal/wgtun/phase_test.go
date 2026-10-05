@@ -19,7 +19,7 @@ func TestProbeCandidatesCancelReportsNothing(t *testing.T) {
 	var calls int
 	onPhase := func(string) { calls++ }
 
-	_, err := probeCandidates(ctx, Config{}, "", false, onPhase)
+	_, _, err := probeCandidates(ctx, Config{}, "", false, onPhase)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v; want context.Canceled", err)
 	}

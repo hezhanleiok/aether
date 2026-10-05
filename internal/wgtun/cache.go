@@ -17,6 +17,54 @@ import (
 type endpointCache struct {
 	Version   int             `json:"version"`
 	Endpoints []endpointEntry `json:"endpoints"`
+	// LastPruned is when the out-of-pool sweep last ran (see pruneOutOfPool).
+	// Zero value means "never", so an existing cache file gets one prune pass
+	// on the next connect and then at most one per pruneInterval.
+	LastPruned time.Time `json:"lastPruned"`
+}
+
+// pruneInterval is the minimum gap between two out-of-pool cache sweeps. The
+// sweep has to materialise the whole generated pool (~2032 addresses), which is
+// fine once a day at connect time and wasteful on every lookup.
+const pruneInterval = 24 * time.Hour
+
+// pruneOutOfPool drops cached endpoints that this build's candidate pool can no
+// longer generate, reporting how many went and whether it actually ran (the
+// caller must save when it did, so the timestamp persists).
+//
+// Why this exists: the pool is derived from cfIPv4Prefixes with a host%54 port,
+// so any address cached under an older prefix list or an older port mapping can
+// never be proposed by a sweep again — it just sits in the cache and gets
+// probed on every single connect. On 2026-10-05 five of the eight fast-path
+// candidates were exactly that (three 8.x addresses from before those segments
+// drifted out of the pool, plus two whose port no longer matches their host).
+//
+// The seed is always kept: it is the operator's pinned endpoint, it does not
+// have to be in the generated pool to be worth trying.
+func (c *endpointCache) pruneOutOfPool(seed string) (removed int, ran bool) {
+	if time.Since(c.LastPruned) < pruneInterval {
+		return 0, false
+	}
+	c.LastPruned = time.Now()
+	reachable := make(map[string]bool, len(cfIPv4Prefixes)*254+1)
+	if seed != "" {
+		reachable[seed] = true
+	}
+	for _, ep := range poolAddresses() {
+		reachable[ep] = true
+	}
+	out := c.Endpoints[:0]
+	for _, e := range c.Endpoints {
+		if reachable[e.Addr] {
+			out = append(out, e)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		c.Endpoints = out
+	}
+	return removed, true
 }
 
 type endpointEntry struct {
@@ -115,11 +163,21 @@ func (c *endpointCache) recordAttempt(addr string, success bool) {
 		}
 		return
 	}
-	e := endpointEntry{Addr: addr, Attempts: 1, LastUsed: time.Now()}
-	if success {
-		e.SuccessCount = 1
+	// Unknown endpoint: only a SUCCESS earns it a cache entry. Persisting every
+	// failed candidate grew the cache by ~11 entries per sweep-driven connect
+	// (8 -> 12 -> 19 -> ... on 2026-10-05), which inflates endpoints.json
+	// without bound and, worse, makes the next fast path probe dozens of
+	// endpoints that have never once worked. A failure is only interesting as a
+	// demotion of something already known to work.
+	if !success {
+		return
 	}
-	c.Endpoints = append(c.Endpoints, e)
+	c.Endpoints = append(c.Endpoints, endpointEntry{
+		Addr:         addr,
+		Attempts:     1,
+		SuccessCount: 1,
+		LastUsed:     time.Now(),
+	})
 }
 
 // orderedAddrs returns cached endpoint addresses ordered for HANDSHAKE
@@ -162,6 +220,20 @@ func (c *endpointCache) recordSuccess(addr string, rttMs int64) {
 		SuccessCount: 1,
 		LastUsed:     time.Now(),
 	})
+}
+
+// pruneStaleCache runs the out-of-pool sweep against the on-disk cache and
+// persists the result. It saves whenever the sweep RAN, not only when it removed
+// something, so the LastPruned timestamp survives and the next connect does not
+// rebuild the pool again. Connect-time only — it is far too heavy for
+// loadCache's many hot callers.
+func pruneStaleCache(seed string) (removed int, ran bool) {
+	c := loadCache()
+	removed, ran = c.pruneOutOfPool(seed)
+	if ran {
+		c.save()
+	}
+	return removed, ran
 }
 
 // evict removes addr from the cache immediately, bypassing the failure

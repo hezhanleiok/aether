@@ -109,7 +109,10 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 	// endpoint is captured by the outer /32 host route and loops inside the
 	// outer tunnel (observed as mass "Failed to send data packets: short
 	// buffer" on the outer peer and an inner handshake that never completes).
-	cands, err := probeCandidates(ctx, outerCfg, innerCfg.Endpoint, false, phase)
+	// fromSweep is unused here: both branches of the stacked outer handshake use
+	// the full deadline (handshakeTimeout), so unlike Manager.Start there is no
+	// short-vs-full deadline choice to make from it.
+	cands, _, err := probeCandidates(ctx, outerCfg, innerCfg.Endpoint, false, phase)
 	if err != nil {
 		return nil, fmt.Errorf("wgtun: outer candidates: %w", err)
 	}
@@ -134,7 +137,7 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 	connectedOuter, err := handshakeAcross(outer, cands, handshakeTimeout)
 	if err != nil && ctx.Err() == nil {
 		logx.Infof("[wgtun] stacked: cached/seed outer candidates all failed (%v); running full sweep", err)
-		swept, serr := probeCandidates(ctx, outerCfg, innerCfg.Endpoint, true, phase)
+		swept, _, serr := probeCandidates(ctx, outerCfg, innerCfg.Endpoint, true, phase)
 		if serr == nil {
 			connectedOuter, err = handshakeAcross(outer, swept, handshakeTimeout)
 		}

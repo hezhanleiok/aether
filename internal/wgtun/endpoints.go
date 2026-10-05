@@ -88,11 +88,24 @@ func buildCandidates(seed string) []string {
 		add(ep)
 	}
 
+	for _, ep := range poolAddresses() {
+		add(ep)
+	}
+	return out
+}
+
+// poolAddresses returns the endpoints this build's candidate pool GENERATES:
+// every host of every /24 prefix at its host%54 port. It is what buildCandidates
+// draws on, minus the seed and the cache-injected entries — i.e. exactly the set
+// a sweep can ever propose. endpointCache.pruneOutOfPool uses it to tell "an
+// endpoint the pool still reaches" from "an address from an older prefix list or
+// an older port mapping, which no sweep will ever offer again".
+func poolAddresses() []string {
 	portCount := len(warpPorts)
+	out := make([]string, 0, len(cfIPv4Prefixes)*254)
 	for _, prefix := range cfIPv4Prefixes {
 		for host := 1; host <= 254; host++ {
-			port := warpPorts[host%portCount]
-			add(fmt.Sprintf("%s.%d:%d", prefix, host, port))
+			out = append(out, fmt.Sprintf("%s.%d:%d", prefix, host, warpPorts[host%portCount]))
 		}
 	}
 	return out
@@ -176,6 +189,17 @@ const udpProbeWorkers = 24
 // the user's whole link mid-connect) must not be reproducible by something
 // this frequent. With typically ≤10 cached candidates the cap rarely binds.
 const fastPathProbeWorkers = 8
+
+// fastPathRetryDelay is how long the fast path waits before re-probing the same
+// cached/seed endpoints when ALL of them came back dead. The probe demands three
+// rounds with ZERO loss, so one short loss spike condemns the whole batch at
+// once — and that happens most often right at connect start, immediately after a
+// disconnect or an app restart (observed 2026-10-05: an all-dead fast path was
+// followed ~1s later by a sweep finding 934/1781 alive, and an endpoint the fast
+// path had just declared dead went on to handshake successfully). 2s is nothing
+// against the ~57s a full sweep costs, and it is skipped entirely when the
+// connect has been cancelled.
+const fastPathRetryDelay = 2 * time.Second
 
 // failoverPorts are the ports tried against the SAME host when an endpoint
 // dies. Port matters as much as host: observed 2026-10-04, one host was stable
@@ -290,9 +314,16 @@ func cachedCandidates(seed, exclude string) []liveEndpoint {
 // Handshaking is left to the real tunnel (single WireGuard device, hot-switched
 // endpoints): running several throwaway devices concurrently was observed to
 // complete handshakes the real tunnel then could not reproduce.
-func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep bool, onPhase func(string)) ([]liveEndpoint, error) {
+// probeCandidates returns (candidates, fromSweep, error). fromSweep tells the
+// caller whether the list came from the cheap cached/seed pre-screen or from the
+// full-pool UDP sweep — the caller needs that to pick a handshake deadline:
+// cached/seed entries get the short one (a stale entry should fail fast and hand
+// over to the sweep), swept entries are already known-live and get the full one.
+// Conflating the two is how swept candidates ended up with the 6s deadline meant
+// for stale cache entries (2026-10-05).
+func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep bool, onPhase func(string)) ([]liveEndpoint, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !useSweep {
 		quick := cachedCandidates(cfg.Endpoint, exclude)
@@ -319,9 +350,24 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 			// UI's "scan n/total" wording is the full-sweep's progress. Silence
 			// keeps a healthy reconnect looking exactly like it used to.
 			live := filterLiveStrict(ctx, addrs, fastPathProbeWorkers, nil)
+			if len(live) == 0 && ctx.Err() == nil {
+				// Everything dead at once is far more likely one loss spike than
+				// eight simultaneous deaths, and the probe rejects on a single
+				// lost round. Pay 2s and re-ask before paying ~57s for a sweep.
+				select {
+				case <-time.After(fastPathRetryDelay):
+				case <-ctx.Done():
+					return nil, false, ctx.Err()
+				}
+				live = filterLiveStrict(ctx, addrs, fastPathProbeWorkers, nil)
+				if len(live) > 0 {
+					logx.Infof("[wgtun] fast path: retry after %v recovered %d/%d cached/seed endpoints",
+						fastPathRetryDelay, len(live), len(quick))
+				}
+			}
 			if len(live) > 0 {
 				logx.Infof("[wgtun] fast path: %d/%d cached/seed endpoints answered the liveness probe", len(live), len(quick))
-				return orderHandshakeCandidates(live), nil
+				return orderHandshakeCandidates(live), false, nil
 			}
 			logx.Infof("[wgtun] fast path: none of the %d cached/seed endpoints answered; falling through to the full sweep", len(quick))
 		}
@@ -332,7 +378,7 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 	}
 	live := filterLiveStrict(ctx, candidates, udpProbeWorkers, onPhase)
 	if len(live) == 0 {
-		return nil, fmt.Errorf("no endpoint answered the liveness probe (checked %d candidates)", len(candidates))
+		return nil, true, fmt.Errorf("no endpoint answered the liveness probe (checked %d candidates)", len(candidates))
 	}
 	logx.Infof("[wgtun] %d/%d endpoints answered the liveness probe", len(live), len(candidates))
 	// Order BEFORE truncating: the top-N must be the N most likely to handshake,
@@ -341,7 +387,7 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 	if len(live) > maxHandshakeCandidates {
 		live = live[:maxHandshakeCandidates]
 	}
-	return live, nil
+	return live, true, nil
 }
 
 // orderHandshakeCandidates ranks candidate endpoints for the real-tunnel
