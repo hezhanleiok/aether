@@ -141,7 +141,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 			if err := peer.SendBuffers(junks); err != nil {
 				peer.device.log.Errorf("%v - Failed to send junk packets: %v", peer, err)
 			} else {
-				peer.device.log.Verbosef("%v - Sent %d junk packets before handshake initiation", peer, len(junks))
+				peer.device.log.Verbosef("%v - Sent %d decoy packet(s) before handshake initiation (I1 + junk)", peer, len(junks))
 			}
 		}
 	}
@@ -266,7 +266,6 @@ func (device *Device) RoutineReadFromTUN() {
 
 			elem := elems[i]
 			elem.packet = bufs[i][offset : offset+sizes[i]]
-			device.log.Verbosef("[DUMP-TUN] read from TUN: len=%d", len(elem.packet))
 
 			// lookup peer
 			var peer *Peer
@@ -534,7 +533,6 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		for _, elem := range elemsContainer.elems {
 			if len(elem.packet) != MessageKeepaliveSize {
 				dataSent = true
-				device.log.Verbosef("[DUMP-SEND] sending data packet: len=%d", len(elem.packet))
 			}
 			bufs = append(bufs, elem.packet)
 		}

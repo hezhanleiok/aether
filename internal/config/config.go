@@ -64,6 +64,11 @@ const (
 	DefaultJunkMaxSize = 50
 )
 
+// DefaultAWGI1 is the fake-first-packet profile the AWG entry turns on. QUIC
+// is warpscout's documented "start here" profile: of the I1 shapes it
+// generates, the QUIC one is the one that most often gets through.
+const DefaultAWGI1 = "quic"
+
 // Settings is the whole persisted state of the client.
 type Settings struct {
 	// Identity / mode
@@ -106,6 +111,16 @@ type Settings struct {
 	JunkCount   int `json:"junk_count"`
 	JunkMinSize int `json:"junk_min_size"`
 	JunkMaxSize int `json:"junk_max_size"`
+
+	// AWGI1 is the AmneziaWG fake first packet: a profile name
+	// (quic/dns/stun/sip/random/none) or raw hex for an externally generated
+	// packet. It is the half of AmneziaWG that upstream reports as the one
+	// that actually matters (DPI judges a flow by how it opens), so the AWG
+	// entry in the switcher turns it on together with the junk. "" = none.
+	AWGI1 string `json:"awg_i1"`
+	// AWGI1SNI is the hostname the quic/sip profiles mention. Empty = a
+	// well-known host nobody blocks.
+	AWGI1SNI string `json:"awg_i1_sni"`
 
 	// Networking
 	IPStack       IPMode `json:"ip_stack"`

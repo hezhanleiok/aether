@@ -28,7 +28,7 @@ $Store = 'patches/full'
 $Patches = @(
     @{
         Name   = 'awg-junk'
-        Why    = 'AmneziaWG junk decoys (Jc/Jmin/Jmax): UAPI keys, generator, pre-handshake send'
+        Why    = 'AmneziaWG anti-DPI decoys: junk (jc/jmin/jmax) + fake first packet (i1), generator, pre-handshake send'
         Files  = @(
             @{ Path = "$Vendor/device/awgjunk.go"; Marker = 'type awgJunk struct' },
             @{ Path = "$Vendor/device/device.go"; Marker = 'junk awgJunk' },

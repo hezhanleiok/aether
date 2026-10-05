@@ -8,6 +8,7 @@ package device
 import (
 	"bufio"
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -204,6 +205,27 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 			}
 			device.junkPending.maxSize = n
 			continue
+		case "i1":
+			// The AmneziaWG fake first packet, as raw hex ("" or "none" clears
+			// it). It is sent before the junk decoys and before the initiation.
+			// No transformation happens here: whatever bytes the caller
+			// generated (a canned QUIC Initial, a DNS query, ...) go out
+			// verbatim, which is what makes an externally generated packet
+			// (e.g. warpscout's -i1) usable as-is.
+			v := strings.TrimSpace(value)
+			if v == "" || strings.EqualFold(v, "none") {
+				device.junkPending.i1 = nil
+				continue
+			}
+			b, err := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(v, "0x"), "0X"))
+			if err != nil {
+				return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse i1 (want hex): %w", err)
+			}
+			if len(b) == 0 {
+				return ipcErrorf(ipc.IpcErrorInvalid, "i1 is empty")
+			}
+			device.junkPending.i1 = b
+			continue
 		}
 
 		var err error
@@ -238,6 +260,9 @@ func (device *Device) applyJunkConfig() error {
 	}
 	if p.count > 0 {
 		device.log.Verbosef("UAPI: junk packets enabled (jc=%d jmin=%d jmax=%d)", p.count, p.minSize, p.maxSize)
+	}
+	if len(p.i1) > 0 {
+		device.log.Verbosef("UAPI: fake first packet (I1) enabled: %d bytes, first byte 0x%02x", len(p.i1), p.i1[0])
 	}
 	return nil
 }

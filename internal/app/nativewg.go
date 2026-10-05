@@ -103,6 +103,18 @@ func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 	} else {
 		cfg.JunkCount, cfg.JunkMinSize, cfg.JunkMaxSize = 0, 0, 0
 	}
+	// Fake first packet (I1). A profile name is expanded here; raw hex (an
+	// externally generated packet) goes through verbatim. A bad value is
+	// logged and skipped — it must not turn into a failed connect.
+	if s.AWGI1 != "" {
+		pkt, err := wgtun.ParseI1(s.AWGI1, s.AWGI1SNI, nil)
+		if err != nil {
+			logx.Errorf("[app] native WireGuard: I1 %q: %v (continuing without it)", s.AWGI1, err)
+		} else if len(pkt) > 0 {
+			cfg.JunkI1 = pkt
+			logx.Infof("[app] native WireGuard: I1 fake first packet ON (%s, %d bytes)", s.AWGI1, len(pkt))
+		}
+	}
 
 	m := &wgtun.Manager{}
 	// Bridge wgtun's session-state transitions onto the shared state machine so

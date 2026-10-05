@@ -4,6 +4,7 @@ package webbridge
 
 import (
 	"net"
+	"strings"
 	"time"
 
 	"github.com/aethergui/aethergui/internal/app"
@@ -100,9 +101,10 @@ func ProtocolKey(s config.Settings) string {
 	case s.Mode == config.ModeGool || s.Protocol == "gool":
 		return "gool"
 	case s.Mode == config.ModeWARP || s.Mode == config.ModeWireGuard || s.Protocol == "wg":
-		// AWG is WireGuard + junk on the native backend, so it is a property
-		// of the WireGuard-class modes rather than a mode of its own.
-		if s.AWGJunk {
+		// AWG is WireGuard + obfuscation on the native backend, so it is a
+		// property of the WireGuard-class modes rather than a mode of its own.
+		// Either half (junk decoys or the fake first packet) makes it AWG.
+		if s.AWGJunk || (s.AWGI1 != "" && !strings.EqualFold(s.AWGI1, "none")) {
 			return "awg"
 		}
 		return "wg"

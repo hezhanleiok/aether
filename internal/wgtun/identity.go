@@ -148,13 +148,26 @@ func loadOverrideConf(path string) (Config, error) {
 		return Config{}, fmt.Errorf("Jc=%d but Jmin/Jmax missing or non-positive", cfg.JunkCount)
 	}
 
-	// I1..I5 (the fixed "special junk" templates, e.g. a canned QUIC Initial)
-	// are NOT implemented yet: the minimal set is Jc/Jmin/Jmax only. Say so
-	// loudly instead of silently dropping them — the A/B result is meaningless
-	// if you think I1 was applied when it was not.
-	for _, k := range []string{"I1", "I2", "I3", "I4", "I5", "J1", "J2", "J3"} {
+	// I1, the fake first packet: either raw hex (an externally generated
+	// packet, e.g. warpscout's -i1 output) or one of the profile names from
+	// i1gen.go (quic/dns/stun/sip/random). Sent before the junk decoys.
+	if v := iniRaw(kv, "I1"); v != "" {
+		pkt, err := ParseI1(v, iniRaw(kv, "I1SNI"), nil)
+		if err != nil {
+			return Config{}, fmt.Errorf("I1: %w", err)
+		}
+		cfg.JunkI1 = pkt
+		if len(pkt) > 0 {
+			logx.Infof("[wgtun] I1 fake first packet enabled: %d bytes (from override conf)", len(pkt))
+		}
+	}
+	// I2..I5 and J1..J3 are still NOT implemented: AmneziaWG's extra canned
+	// packets and its "controlled junk" counters. Say so loudly instead of
+	// silently dropping them — an A/B result is meaningless if you think they
+	// were applied when they were not.
+	for _, k := range []string{"I2", "I3", "I4", "I5", "J1", "J2", "J3"} {
 		if iniRaw(kv, k) != "" {
-			logx.Warnf("[wgtun] %s in override conf: special/controlled junk is NOT implemented yet; ignored", k)
+			logx.Warnf("[wgtun] %s in override conf: not implemented yet; ignored", k)
 		}
 	}
 	return cfg, nil

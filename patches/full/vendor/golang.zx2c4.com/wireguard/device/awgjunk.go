@@ -14,11 +14,15 @@ import (
 	"sync"
 )
 
-// awgJunkParams is the raw (unvalidated) form of the three junk parameters.
+// awgJunkParams is the raw (unvalidated) form of the junk parameters.
 type awgJunkParams struct {
 	count   int
 	minSize int
 	maxSize int
+	// i1 is the AmneziaWG "fake first packet": one canned packet sent BEFORE
+	// the junk decoys and before the initiation itself. AmneziaWG ships I1..I5;
+	// only I1 is implemented here — see the note below.
+	i1 []byte
 }
 
 // awgJunk holds the AmneziaWG "junk packet" configuration. Before every
@@ -33,6 +37,15 @@ type awgJunkParams struct {
 // the whole point: everything here must be invisible to the peer. S1/S2/H1-H4
 // are the parts that require an AmneziaWG-capable peer and are NOT implemented.
 //
+// I1 (the fake first packet) is the half that actually matters against DPI:
+// upstream tooling (warpscout) reports that a filter judges a flow by how it
+// OPENS, so a session starting with a QUIC/DNS/STUN-looking packet often passes
+// where one starting with a bare 148-byte WireGuard initiation does not — while
+// changing the junk sizes alone rarely helps. It is sent first, then the junk
+// decoys, then the (unchanged) initiation. I2..I5 are just more canned packets
+// in AmneziaWG; a single I1 is what the reference clients and warpscout's
+// -i1 flag configure, so that is the subset implemented here.
+//
 // Concurrency: all fields are guarded by mu. create() takes the write lock
 // because it advances the ChaCha8 stream (math/rand's sources are not safe for
 // concurrent use), which is fine — handshakes are rare (once per ~120s rekey).
@@ -41,14 +54,17 @@ type awgJunk struct {
 	count   int
 	minSize int
 	maxSize int
+	i1      []byte
 	rand    *rand.ChaCha8
 }
 
-// enabled reports whether junk packets should precede the next handshake.
+// enabled reports whether anything should precede the next handshake: either
+// the fake first packet (which is useful on its own, even with Jc=0) or the
+// junk decoys.
 func (j *awgJunk) enabled() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.count > 0 && j.rand != nil
+	return (j.count > 0 && j.rand != nil) || len(j.i1) > 0
 }
 
 // configure validates the three parameters together (so key order in the UAPI
@@ -69,12 +85,17 @@ func (j *awgJunk) configure(p awgJunkParams) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
+	if len(p.i1) >= MaxSegmentSize {
+		return fmt.Errorf("fake first packet (%d bytes) must be smaller than max segment size %d", len(p.i1), MaxSegmentSize)
+	}
 	j.count = p.count
 	j.minSize = p.minSize
 	j.maxSize = p.maxSize
+	// Copy: the caller owns the slice it staged (UAPI reuses its buffer).
+	j.i1 = append([]byte(nil), p.i1...)
 	j.rand = nil
 	if j.count == 0 {
-		return nil // disabled: no generator needed
+		return nil // no junk: I1 alone still stands, but needs no generator
 	}
 	// The reference bumps max when it equals min so its size generator can draw
 	// from a non-empty range; keep the same leniency instead of rejecting a
@@ -98,9 +119,19 @@ func (j *awgJunk) create() ([][]byte, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.count <= 0 || j.rand == nil {
-		return nil, nil
+		// No junk decoys configured — but the fake first packet is useful on
+		// its own (Jc=0 + I1 is a normal AmneziaWG shape), so still send it.
+		if len(j.i1) == 0 {
+			return nil, nil
+		}
+		return [][]byte{append([]byte(nil), j.i1...)}, nil
 	}
-	out := make([][]byte, 0, j.count)
+	out := make([][]byte, 0, j.count+1)
+	// Order matters: I1 first, then the random decoys, then (in the caller)
+	// the untouched handshake initiation.
+	if len(j.i1) > 0 {
+		out = append(out, append([]byte(nil), j.i1...))
+	}
 	for range j.count {
 		size := int(j.rand.Uint64()%uint64(j.maxSize-j.minSize)) + j.minSize
 		packet := make([]byte, size)

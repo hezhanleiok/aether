@@ -141,7 +141,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 			if err := peer.SendBuffers(junks); err != nil {
 				peer.device.log.Errorf("%v - Failed to send junk packets: %v", peer, err)
 			} else {
-				peer.device.log.Verbosef("%v - Sent %d junk packets before handshake initiation", peer, len(junks))
+				peer.device.log.Verbosef("%v - Sent %d decoy packet(s) before handshake initiation (I1 + junk)", peer, len(junks))
 			}
 		}
 	}

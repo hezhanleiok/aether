@@ -64,6 +64,8 @@ func main() {
 	jc := flag.Int("jc", -1, "override Jc (-1 = use the config value, 0 = disable junk)")
 	jmin := flag.Int("jmin", -1, "override Jmin (-1 = use the config value)")
 	jmax := flag.Int("jmax", -1, "override Jmax (-1 = use the config value)")
+	i1 := flag.String("i1", "", "AmneziaWG fake first packet: profile (quic|dns|stun|sip|random|none) or raw hex; empty = leave the config value")
+	i1sni := flag.String("i1-sni", "", "hostname the quic/sip I1 profiles mention (empty = a well-known host nobody blocks)")
 	flag.Parse()
 
 	logx.Init("info", config.Dir())
@@ -114,6 +116,22 @@ func main() {
 		fmt.Printf("junk: ON jc=%d jmin=%d jmax=%d\n", cfg.JunkCount, cfg.JunkMinSize, cfg.JunkMaxSize)
 	} else {
 		fmt.Println("junk: OFF (WireGuard baseline)")
+	}
+	// I1 is the half that upstream reports as the one that matters, so it gets
+	// its own knob: -i1 quic is the documented "start here" shape, and raw hex
+	// lets an externally generated packet (warpscout -i1) run byte-for-byte.
+	if *i1 != "" {
+		pkt, err := wgtun.ParseI1(*i1, *i1sni, nil)
+		if err != nil {
+			fmt.Println("i1:", err)
+			os.Exit(1)
+		}
+		cfg.JunkI1 = pkt
+	}
+	if len(cfg.JunkI1) > 0 {
+		fmt.Printf("i1: ON %d bytes (profile %q)\n", len(cfg.JunkI1), *i1)
+	} else {
+		fmt.Println("i1: OFF (no fake first packet)")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

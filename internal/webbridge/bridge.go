@@ -399,10 +399,25 @@ func applyProtocol(s config.Settings, p Protocol) config.Settings {
 	if p.Native {
 		s.NativeWireGuard = true
 	}
-	if p.AWG && s.JunkCount <= 0 {
-		s.JunkCount = config.DefaultJunkCount
-		s.JunkMinSize = config.DefaultJunkMinSize
-		s.JunkMaxSize = config.DefaultJunkMaxSize
+	if p.AWG {
+		if s.JunkCount <= 0 {
+			s.JunkCount = config.DefaultJunkCount
+			s.JunkMinSize = config.DefaultJunkMinSize
+			s.JunkMaxSize = config.DefaultJunkMaxSize
+		}
+		// The fake first packet is the half that actually gets a connection
+		// past a filter (warpscout: DPI judges a flow by how it opens), so AWG
+		// turns it on too — QUIC first, which is the profile its docs say to
+		// start with. It stays a separate setting so "junk only" and "I1 only"
+		// remain measurable.
+		if s.AWGI1 == "" {
+			s.AWGI1 = config.DefaultAWGI1
+		}
+	} else {
+		// Leaving AWG returns to the plain WireGuard baseline: no junk, no
+		// fake first packet. A half-cleared obfuscation would make every A/B
+		// afterwards meaningless.
+		s.AWGI1 = ""
 	}
 	return s
 }

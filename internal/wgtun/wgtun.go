@@ -80,6 +80,14 @@ type Config struct {
 	JunkCount   int // Jc
 	JunkMinSize int // Jmin
 	JunkMaxSize int // Jmax
+
+	// JunkI1 is the AmneziaWG fake first packet: one canned packet sent BEFORE
+	// the junk decoys and before the handshake initiation, so the flow opens
+	// with something other than a bare 148-byte WireGuard initiation. Nil
+	// disables it. Upstream (warpscout) reports this is the half that actually
+	// gets a connection past a filter; the junk sizes alone rarely do.
+	// See i1gen.go for the generators and for what they do NOT claim.
+	JunkI1 []byte
 }
 
 // Tunnel is a running native WireGuard session.
@@ -455,8 +463,12 @@ func buildUAPI(cfg Config) (string, error) {
 	fmt.Fprintf(&b, "allowed_ip=0.0.0.0/0\n")
 	fmt.Fprintf(&b, "allowed_ip=::/0\n")
 	fmt.Fprintf(&b, "persistent_keepalive_interval=25\n")
-	// Junk decoys last: they are device-level keys and are applied (and
-	// validated) only after the whole UAPI operation has been read.
+	// Fake first packet (I1) first, then the junk decoys: both are device-level
+	// keys and are applied (and validated) only after the whole UAPI operation
+	// has been read.
+	if len(cfg.JunkI1) > 0 {
+		fmt.Fprintf(&b, "i1=%x\n", cfg.JunkI1)
+	}
 	if cfg.JunkCount > 0 {
 		fmt.Fprintf(&b, "jc=%d\n", cfg.JunkCount)
 		fmt.Fprintf(&b, "jmin=%d\n", cfg.JunkMinSize)
