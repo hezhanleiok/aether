@@ -1,6 +1,7 @@
 package vpn
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -170,5 +171,81 @@ func TestEnvForChainedExit(t *testing.T) {
 	s.ExitRegion = ""
 	if _, ok := envFor(s)["AETHER_PSIPHON_REGION"]; ok {
 		t.Error("automatic exit must not send a region")
+	}
+}
+
+// TestNativeExitOnly pins which exit backend rides on top of the native
+// WireGuard tunnel. Psiphon/Tor become the core's "only" mode (no tunnel
+// underneath it); reverse is excluded because there the backend is the ENTRY,
+// not the exit.
+func TestNativeExitOnly(t *testing.T) {
+	cases := []struct {
+		chain    string
+		wantBack string
+		wantOnly string
+	}{
+		{ChainNone, "", ChainNone},
+		{ChainPsiphon, "psiphon", ChainPsiphonOnly},
+		{ChainPsiphonOnly, "psiphon", ChainPsiphonOnly},
+		{ChainPsiphonReverse, "", ChainNone},
+		{ChainTor, "tor", ChainTorOnly},
+		{ChainTorOnly, "tor", ChainTorOnly},
+	}
+	for _, c := range cases {
+		s := config.Defaults()
+		s.ExitChain = c.chain
+		if got := NativeExitOnly(s); got != c.wantBack {
+			t.Errorf("NativeExitOnly(%q) = %q, want %q", c.chain, got, c.wantBack)
+		}
+		if got := OnlyChainFor(s); got != c.wantOnly {
+			t.Errorf("OnlyChainFor(%q) = %q, want %q", c.chain, got, c.wantOnly)
+		}
+	}
+}
+
+// TestEnvForOnlyModePorts pins the measured only-mode ports: 1821/1823 are
+// CHAIN ports and are simply not listening in only mode (the core puts the
+// backend's SOCKS on 1819), so sending them would be sending a lie.
+func TestEnvForOnlyModePorts(t *testing.T) {
+	s := config.Defaults()
+	s.ExitChain = ChainPsiphonOnly
+	env := envFor(s)
+	if env["AETHER_PSIPHON"] != "only" {
+		t.Fatalf("AETHER_PSIPHON = %q, want only", env["AETHER_PSIPHON"])
+	}
+	if want := fmt.Sprintf("127.0.0.1:%d", OnlySocksPort); env["AETHER_PSIPHON_BIND"] != want {
+		t.Errorf("only-mode BIND = %q, want %q (1819 measured, not the chain's 1821)", env["AETHER_PSIPHON_BIND"], want)
+	}
+	if want := fmt.Sprintf("127.0.0.1:%d", OnlyPsiphonHTTPPort); env["AETHER_PSIPHON_HTTP"] != want {
+		t.Errorf("only-mode HTTP = %q, want %q", env["AETHER_PSIPHON_HTTP"], want)
+	}
+
+	ts := config.Defaults()
+	ts.ExitChain = ChainTorOnly
+	tenv := envFor(ts)
+	if tenv["AETHER_TOR"] != "only" {
+		t.Fatalf("AETHER_TOR = %q, want only", tenv["AETHER_TOR"])
+	}
+	if want := fmt.Sprintf("127.0.0.1:%d", OnlyTorSocksPort); tenv["AETHER_TOR_BIND"] != want {
+		t.Errorf("only-mode tor BIND = %q, want %q (1819 measured, not the chain's 1823)", tenv["AETHER_TOR_BIND"], want)
+	}
+}
+
+// TestParseHTTPProxyPort covers the discovery path: the system proxy must use
+// the port the core ANNOUNCED, never a guessed one (Tor-only's HTTP port is
+// still unmeasured, so guessing 1824 is exactly what this prevents).
+func TestParseHTTPProxyPort(t *testing.T) {
+	if got := parseHTTPProxyPort("[+] psiphon http proxy on 127.0.0.1:1822"); got != 1822 {
+		t.Errorf("psiphon http = %d, want 1822", got)
+	}
+	if got := parseHTTPProxyPort("[+] tor http proxy on 127.0.0.1:1824"); got != 1824 {
+		t.Errorf("tor http = %d, want 1824", got)
+	}
+	// A SOCKS notice is not an HTTP port, and unrelated lines yield nothing.
+	if got := parseHTTPProxyPort("127.0.0.1:1819 leaves through psiphon"); got != 0 {
+		t.Errorf("socks notice = %d, want 0 (SOCKS is not the system proxy)", got)
+	}
+	if got := parseHTTPProxyPort("nothing here"); got != 0 {
+		t.Errorf("unrelated = %d, want 0", got)
 	}
 }

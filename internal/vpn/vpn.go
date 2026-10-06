@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +68,24 @@ const (
 	TorHTTPPort      = 1824
 )
 
+// Only-mode listeners ("no tunnel underneath it").
+//
+// MEASURED against core 2.1.0 (2026-10-06): in only mode the core IGNORES
+// AETHER_PSIPHON_BIND / AETHER_TOR_BIND and puts the backend's SOCKS on the
+// core's own bind, 1819 — 1821/1823 are the CHAIN ports and are simply not
+// listening here. The HTTP listener does honour the *_HTTP variable (psiphon
+// measured: 1822). Tor's HTTP port is only REQUESTED by us (1824); it has
+// never been observed bound because Tor never reached ready on this network,
+// so nothing here may treat it as a measured fact — see ExitHTTPPort, which
+// reads the port the core actually announces.
+const (
+	OnlySocksPort    = 1819
+	OnlyTorSocksPort = 1819
+	// OnlyPsiphonHTTPPort / OnlyTorHTTPPort are the values we ask for.
+	OnlyPsiphonHTTPPort = PsiphonHTTPPort
+	OnlyTorHTTPPort     = TorHTTPPort
+)
+
 // State is the full observable state of the manager.
 type State struct {
 	Status      Status      `json:"status"`
@@ -107,7 +126,87 @@ type Manager struct {
 	// dropHook fires when the core exits while a session was up. Nothing
 	// watched that before, so a crashed core simply went quiet.
 	dropHook func()
+	// exitHTTPPort is the HTTP CONNECT port the exit backend ANNOUNCED ("" if
+	// it announced none). Read through ExitHTTPPort; see parseHTTPProxyPort.
+	exitHTTPPort int
+	// backendReady records that the core (or its exit backend) reported
+	// itself up during this session. Read through BackendReady.
+	backendReady bool
+	// connectGate, when set, gates promotion to Connected: the core's own
+	// "ready" events then only set backendReady, and the gate's owner decides
+	// when Connected is true. See SetConnectGate.
+	connectGate func() bool
 }
+
+// SetConnectGate installs (nil clears) the gate that the core's ready events
+// must pass before they may set Connected.
+//
+// The native-exit orchestration needs this: for the Psiphon/Tor exits,
+// "backend ready" is only ONE precondition — the HTTP proxy must be up and
+// the system proxy set before the session is connected — and a late
+// psiphon_ready belonging to an already-cancelled session must not be able to
+// flip the UI back to Connected while the tunnel is already gone.
+func (m *Manager) SetConnectGate(fn func() bool) {
+	m.mu.Lock()
+	m.connectGate = fn
+	m.mu.Unlock()
+}
+
+// BackendReady reports whether the exit backend reported itself ready during
+// this session.
+func (m *Manager) BackendReady() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.backendReady
+}
+
+// markBackendReady records a "the core / its backend is up" event. With a
+// connect gate installed that is ALL it does — the gate's owner promotes to
+// Connected. Without one (the classic core-driven path) the event itself is
+// the signal, exactly as before.
+func (m *Manager) markBackendReady(setStatus func(*State)) {
+	m.mu.Lock()
+	m.backendReady = true
+	gate := m.connectGate
+	m.mu.Unlock()
+	if gate != nil && !gate() {
+		logx.Infof("[vpn] backend ready; holding Connected until the session orchestration finishes")
+		return
+	}
+	m.set(StatusConnected, setStatus)
+}
+
+// ExitHTTPPort returns the HTTP CONNECT port the exit backend actually
+// announced, or 0 when it announced none.
+//
+// Why this exists: the GUI must never point the Windows system proxy at a
+// port it merely guessed. Psiphon-only was measured to answer on 1822, but
+// Tor-only has never reached ready here, so its HTTP port is unknown - and a
+// system proxy pointed at a dead port is the classic "green VPN, dead
+// browser" failure. The core prints the listener it opened ("... http proxy
+// on 127.0.0.1:1822"); we read that instead of assuming.
+func (m *Manager) ExitHTTPPort() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.exitHTTPPort
+}
+
+// parseHTTPProxyPort reads the port out of the core's listener notice, e.g.
+// "[+] psiphon http proxy on 127.0.0.1:1822". Returns 0 when the line is not
+// such a notice.
+func parseHTTPProxyPort(line string) int {
+	match := reHTTPProxyOn.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(match[1])
+	if err != nil || n <= 0 || n > 65535 {
+		return 0
+	}
+	return n
+}
+
+var reHTTPProxyOn = regexp.MustCompile(`http proxy on 127\.0\.0\.1:(\d+)`)
 
 // SetDropHook registers the callback run when the core drops a live session.
 func (m *Manager) SetDropHook(fn func()) {
@@ -279,7 +378,14 @@ func envFor(s config.Settings) map[string]string {
 	case ChainPsiphon, ChainPsiphonOnly, ChainPsiphonReverse:
 		mode := map[string]string{ChainPsiphon: "chain", ChainPsiphonOnly: "only", ChainPsiphonReverse: "reverse"}[s.ExitChain]
 		set("AETHER_PSIPHON", mode)
-		set("AETHER_PSIPHON_BIND", fmt.Sprintf("127.0.0.1:%d", PsiphonSocksPort))
+		// Only mode: the core ignores BIND and puts SOCKS on 1819 (measured),
+		// so asking for the chain port 1821 here would leave a variable that
+		// disagrees with reality. Keep the requested value honest instead.
+		bind := PsiphonSocksPort
+		if mode == "only" {
+			bind = OnlySocksPort
+		}
+		set("AETHER_PSIPHON_BIND", fmt.Sprintf("127.0.0.1:%d", bind))
 		// Own the datastore path so it can be cleaned after a killed session.
 		set("AETHER_PSIPHON_DIR", PsiphonDir())
 		// Windows' system proxy speaks HTTP, not SOCKS, so ask for an HTTP
@@ -292,16 +398,26 @@ func envFor(s config.Settings) map[string]string {
 		if s.ExitRegion != "" {
 			set("AETHER_PSIPHON_REGION", strings.ToUpper(s.ExitRegion))
 		}
-		logx.Infof("[vpn] exit backend: psiphon mode=%s region=%q socks=%d http=%d",
-			mode, s.ExitRegion, PsiphonSocksPort, PsiphonHTTPPort)
+		httpPort := PsiphonHTTPPort
+		if mode == "only" {
+			httpPort = OnlyPsiphonHTTPPort
+		}
+		logx.Infof("[vpn] exit backend: psiphon mode=%s region=%q socks=%d http=%d (only-mode SOCKS is the core's own bind, 1819)",
+			mode, s.ExitRegion, bind, httpPort)
 	case ChainTor, ChainTorOnly:
 		mode := map[string]string{ChainTor: "chain", ChainTorOnly: "only"}[s.ExitChain]
 		set("AETHER_TOR", mode)
 		// The core's tor default bind is 127.0.0.1:1820 - the same port the
 		// GUI uses for the Aether HTTP proxy. Overriding it is not optional.
-		set("AETHER_TOR_BIND", fmt.Sprintf("127.0.0.1:%d", TorSocksPort))
+		// Only mode: SOCKS lands on 1819 (measured), not the chain's 1823.
+		bind := TorSocksPort
+		if mode == "only" {
+			bind = OnlyTorSocksPort
+		}
+		set("AETHER_TOR_BIND", fmt.Sprintf("127.0.0.1:%d", bind))
 		set("AETHER_TOR_HTTP", fmt.Sprintf("127.0.0.1:%d", TorHTTPPort))
-		logx.Infof("[vpn] exit backend: tor mode=%s socks=%d http=%d", mode, TorSocksPort, TorHTTPPort)
+		logx.Infof("[vpn] exit backend: tor mode=%s socks=%d http=%d (only-mode SOCKS is the core's own bind, 1819; the HTTP port is only requested, the core's announcement decides)",
+			mode, bind, TorHTTPPort)
 	}
 	// Exit-country policy (the core's --exit-loc): "!CN" refuses a tunnel
 	// whose egress geo-resolves to CN and re-selects; "US,JP" allows only
@@ -506,6 +622,7 @@ func (m *Manager) Connect(s config.Settings) error {
 	}
 	m.mu.Lock()
 	m.chain = s.ExitChain
+	m.backendReady = false
 	m.stopCh = make(chan struct{})
 	m.st.Status = StatusConnecting
 	m.st.Mode = s.Mode
@@ -539,6 +656,15 @@ func ensureLocalPortAvailable(port int) error {
 // pump consumes core events into the state machine.
 func (m *Manager) pump(sess coremgr.Session) {
 	for ev := range sess.Events() {
+		// Whatever kind it is, a listener notice is worth capturing: it is the
+		// only place the core states which HTTP port the exit backend really
+		// opened (see ExitHTTPPort).
+		if p := parseHTTPProxyPort(ev.Line); p > 0 {
+			m.mu.Lock()
+			m.exitHTTPPort = p
+			m.mu.Unlock()
+			logx.Infof("[vpn] exit http proxy on 127.0.0.1:%d (announced by the core)", p)
+		}
 		switch ev.Kind {
 		case "log":
 			logx.Debugf("[core] %s", ev.Line)
@@ -555,7 +681,7 @@ func (m *Manager) pump(sess coremgr.Session) {
 			if m.Chain() == ChainPsiphon {
 				m.set(StatusAetherUp, func(st *State) { st.Error = "" })
 			} else {
-				m.set(StatusConnected, func(st *State) { st.Error = "" })
+				m.markBackendReady(func(st *State) { st.Error = "" })
 			}
 		case "psiphon_waiting":
 			// Psiphon is up and waiting for the Aether hop to expose SOCKS.
@@ -565,7 +691,12 @@ func (m *Manager) pump(sess coremgr.Session) {
 		case "psiphon_starting":
 			m.set(StatusStartingPsiphon, nil)
 		case "psiphon_ready":
-			m.set(StatusConnected, func(st *State) { st.Error = "" })
+			// Backend ready is a PRECONDITION, not the verdict: with a connect
+			// gate installed (native exit), the orchestration decides when the
+			// session is Connected. A late psiphon_ready from a cancelled
+			// session used to push the UI straight back to Connected here —
+			// with the native tunnel already gone.
+			m.markBackendReady(func(st *State) { st.Error = "" })
 		case "psiphon_regions":
 			m.SetExitRegions(parseEgressRegions(ev.Line))
 		case "psiphon_exit":
@@ -711,6 +842,52 @@ func (m *Manager) SetPhase(phase string) {
 	m.st.Phase = phase
 	m.mu.Unlock()
 	m.publish()
+}
+
+// NativeExitOnly reports which exit backend must run ON TOP of the native
+// WireGuard tunnel, or "" when the tunnel is itself the exit.
+//
+// The native backend has no Psiphon/Tor of its own - the core runs those - so
+// when the user picks a Psiphon or Tor exit while the native tunnel is the
+// transport, the core is started in its documented "no tunnel underneath it"
+// (only) mode: the backend dials out through the system route, which the
+// native tunnel just took over. Psiphon-reverse is excluded on purpose: there
+// the backend is the ENTRY and the exit is still the core's own tunnel, which
+// the native backend does not have.
+func NativeExitOnly(s config.Settings) string {
+	switch s.ExitChain {
+	case ChainPsiphon, ChainPsiphonOnly:
+		return "psiphon"
+	case ChainTor, ChainTorOnly:
+		return "tor"
+	}
+	return ""
+}
+
+// OnlyChainFor maps an exit choice onto the only-mode value the core expects
+// ("AETHER_PSIPHON=only" / "AETHER_TOR=only").
+func OnlyChainFor(s config.Settings) string {
+	switch NativeExitOnly(s) {
+	case "psiphon":
+		return ChainPsiphonOnly
+	case "tor":
+		return ChainTorOnly
+	}
+	return ChainNone
+}
+
+// OnlyHTTPPort is the HTTP CONNECT port the GUI asks the core to open in only
+// mode. It is a REQUEST, not a measured fact: the port the core actually
+// announces is published through ExitHTTPPort and is what the system proxy
+// must use.
+func OnlyHTTPPort(s config.Settings) int {
+	switch NativeExitOnly(s) {
+	case "psiphon":
+		return OnlyPsiphonHTTPPort
+	case "tor":
+		return OnlyTorHTTPPort
+	}
+	return 0
 }
 
 // ExitsThroughChain reports whether the final egress is the backend's own
@@ -864,6 +1041,10 @@ func (m *Manager) Disconnect() {
 	}
 	m.mu.Lock()
 	m.chain = ChainNone
+	m.exitHTTPPort = 0
+	m.backendReady = false
+	m.connectGate = nil
+	m.st.Chain = ""
 	m.mu.Unlock()
 	m.mu.Lock()
 	m.st.Status = StatusDisconnected

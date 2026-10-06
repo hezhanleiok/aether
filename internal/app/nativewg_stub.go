@@ -49,6 +49,13 @@ func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 	return fmt.Errorf("native WireGuard backend not compiled (build with -tags wgtun)")
 }
 
+// connectNativeExit is unreachable without the native backend: there is no
+// native tunnel for an exit backend to ride on. It exists so the shared
+// Connect flow compiles in both builds.
+func (a *App) connectNativeExit(ctx context.Context, s config.Settings) error {
+	return fmt.Errorf("native WireGuard backend not compiled (build with -tags wgtun)")
+}
+
 func (a *App) disconnectNativeWG() {}
 
 func (a *App) connectNativeStacked(ctx context.Context, s config.Settings) error {

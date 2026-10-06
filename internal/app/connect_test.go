@@ -9,18 +9,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aethergui/aethergui/internal/coremgr"
 	"github.com/aethergui/aethergui/internal/config"
+	"github.com/aethergui/aethergui/internal/coremgr"
 	"github.com/aethergui/aethergui/internal/node"
 	"github.com/aethergui/aethergui/internal/vpn"
 	"github.com/aethergui/aethergui/internal/watchguard"
 )
 
-// newNativeApp builds a minimal App that takes the native (incl. stacked) path
-// in tests. The native connect fails fast in the test environment (no
-// warp-accounts dir), so no real tunnel is built. A non-nil (but empty) core is
-// supplied so SetNativeState does not dereference a nil core; a zero-value Guard
-// is supplied so Disconnect's SetUp call is safe without starting a real guard.
+// newNativeApp builds a minimal App that takes the native path in tests.
+// ExitChain makes the connect a NATIVE EXIT (the only thing the native
+// transport exists for now); AWGI1="none" pins the transport to plain WG so
+// exactly one transport attempt runs per connect (no AWG->WG fallback, which
+// would double every hook count below). The native connect fails fast in the
+// test environment (no warp-accounts dir), so no real tunnel is built. A
+// non-nil (but empty) core is supplied so SetNativeState does not dereference
+// a nil core; a zero-value Guard is supplied so Disconnect's SetUp call is
+// safe without starting a real guard.
 func newNativeApp() *App {
 	return &App{
 		VPN:   vpn.New(coremgr.NewManager(coremgr.NewProcessBackend())),
@@ -30,6 +34,8 @@ func newNativeApp() *App {
 			NativeWireGuard:  true,
 			Mode:             config.ModeWARP,
 			StackedWireGuard: true,
+			ExitChain:        vpn.ChainPsiphon,
+			AWGI1:            "none", // plain WG, no fallback retry
 		},
 	}
 }

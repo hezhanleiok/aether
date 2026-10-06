@@ -69,6 +69,22 @@ type App struct {
 	// connect (which holds connMu for the whole probe).
 	cancelMu      sync.Mutex
 	connectCancel context.CancelFunc
+
+	// Native Exit session bookkeeping (Psiphon / Tor exits ONLY — see
+	// vpn.NativeExitOnly). The DEFAULT exit never touches any of this.
+	//
+	// exitGen is bumped on every native-exit connect. Invalidating a
+	// generation is what makes that session's late core events ignorable: a
+	// psiphon_ready that arrives after the user cancelled (or after the
+	// transport died) must not push the UI back to Connected. A plain bool
+	// cannot express "this event belongs to an older attempt", which is
+	// exactly how the old code ended up green while Psiphon left through
+	// WLAN with the native tunnel already gone.
+	exitMu        sync.Mutex
+	exitGen       uint64
+	exitActive    bool
+	exitBackend   string // "psiphon" | "tor"
+	exitTransport string // "awg" | "wg"
 }
 
 // ErrAlreadyConnecting is returned by Connect() when a connect is already in
@@ -445,18 +461,27 @@ func (a *App) Connect() error {
 		cancel()
 	}()
 
-	// Native WireGuard backend: bypass the core and run the WARP identity
-	// through wireguard-go + wintun (a real TUN + routes + DNS). Only fires
-	// when enabled and in a WireGuard-class mode; the wgtun-tagged build is
-	// required, otherwise useNativeWG is always false. StackedWireGuard
-	// routes the same native path into warp-in-warp (two stacked WARP
-	// tunnels) instead of the single tunnel.
+	// EXIT DISPATCH. The exit choice — not the protocol toggle — decides
+	// whether the native transport is involved at all:
+	//
+	//	exit=default  -> the original core path, untouched (no native AWG/WG,
+	//	                 no Psiphon, no Tor, no only mode)
+	//	exit=psiphon  -> native AWG/WG transport + core Psiphon in only mode
+	//	exit=tor      -> native AWG/WG transport + core Tor in only mode
+	//
+	// The native backend is NOT a shared underlay for every exit: it exists
+	// here only to carry the Psiphon/Tor backend's own traffic. Routing the
+	// default exit through it (which is what `useNativeWG` alone used to do,
+	// since it only looks at Mode) is explicitly wrong.
 	if a.useNativeWG(s) {
-		if s.StackedWireGuard {
-			return a.connectNativeStacked(ctx, s)
-		}
-		return a.connectNativeWG(ctx, s)
+		exit := vpn.NativeExitOnly(s)
+		logx.Infof("[app] exit=%s (native transport + core %s only)", exit, exit)
+		return a.connectNativeExit(ctx, s)
 	}
+	// Default exit: no native transport, no Psiphon, no Tor, no only mode —
+	// the original core-driven path, untouched.
+	logx.Infof("[app] exit=default (core path)")
+
 	if err := a.VPN.Connect(s); err != nil {
 		return err
 	}
@@ -551,6 +576,17 @@ func (a *App) connectWatchdog() {
 
 // Disconnect stops everything and restores the system state.
 func (a *App) Disconnect() {
+	// Invalidate any live Native Exit session FIRST: from here on, a late
+	// core event of that session (a psiphon_ready that lands after this call)
+	// must be ignored instead of reviving the UI. The gate coming off with it
+	// is what makes the ignore effective.
+	a.exitMu.Lock()
+	if a.exitActive {
+		logx.Infof("[app] native exit session #%d invalidated by disconnect", a.exitGen)
+	}
+	a.exitActive = false
+	a.exitMu.Unlock()
+	a.VPN.SetConnectGate(nil)
 	// Defensive reset of the connect guard: a connect in flight is being torn
 	// down here, so any flag it left must not leak into the next Connect (e.g.
 	// a Reconnect's Connect). The authoritative reset is the deferred Store in
@@ -558,16 +594,22 @@ func (a *App) Disconnect() {
 	a.connecting.Store(false)
 	a.connMu.Lock()
 	defer a.connMu.Unlock()
+	// The system proxy goes FIRST: with a chained/only-mode exit it points at
+	// the backend's HTTP listener (1822), and every step below kills that
+	// listener. Releasing up front means no request is ever aimed at a proxy
+	// that is on its way down.
+	if err := sysproxy.Release(); err != nil {
+		logx.Warnf("[app] system proxy release failed: %v", err)
+	}
 	// The native tunnel must be torn down (routes + DNS reverted) before the
 	// rest of the cleanup, so its default route never shadows the other steps.
 	a.disconnectNativeStacked()
 	a.disconnectNativeWG()
 	a.Guard.SetUp(false)
+	// Core stop + orphan-psiphon reaping: on the native path the core is the
+	// thing running Psiphon/Tor, so this is what actually ends them.
 	a.VPN.Disconnect()
 	a.Pool.ClearStatus()
-	if err := sysproxy.Release(); err != nil {
-		logx.Warnf("[app] system proxy release failed: %v", err)
-	}
 	if killswitch.Enabled() {
 		if err := killswitch.Disable(); err != nil {
 			logx.Warnf("[app] kill switch disable failed: %v", err)
@@ -603,6 +645,40 @@ func (a *App) CancelConnect() {
 	if nativeAlive {
 		a.Disconnect()
 	}
+}
+
+// beginNativeExit opens a new Native Exit session and returns its generation.
+// Any session already running is invalidated by the bump: its events can no
+// longer reach the state machine.
+func (a *App) beginNativeExit(backend, transport string) uint64 {
+	a.exitMu.Lock()
+	defer a.exitMu.Unlock()
+	a.exitGen++
+	a.exitActive = true
+	a.exitBackend = backend
+	a.exitTransport = transport
+	return a.exitGen
+}
+
+// nativeExitValid reports whether gen is still the live Native Exit session.
+func (a *App) nativeExitValid(gen uint64) bool {
+	a.exitMu.Lock()
+	defer a.exitMu.Unlock()
+	return a.exitActive && a.exitGen == gen
+}
+
+// endNativeExit invalidates the given Native Exit session. It reports whether
+// the caller owns the teardown: false means the session was already ended (or
+// superseded by a newer one), so a rollback must NOT tear anything down —
+// that is what makes rollbackNativeExit idempotent and staleness-safe.
+func (a *App) endNativeExit(gen uint64) bool {
+	a.exitMu.Lock()
+	defer a.exitMu.Unlock()
+	if !a.exitActive || a.exitGen != gen {
+		return false
+	}
+	a.exitActive = false
+	return true
 }
 
 // Reconnect = disconnect + connect.

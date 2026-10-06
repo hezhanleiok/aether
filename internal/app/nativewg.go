@@ -6,16 +6,20 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aethergui/aethergui/internal/config"
 	"github.com/aethergui/aethergui/internal/logx"
 	"github.com/aethergui/aethergui/internal/node"
+	"github.com/aethergui/aethergui/internal/sysproxy"
 	"github.com/aethergui/aethergui/internal/vpn"
 	"github.com/aethergui/aethergui/internal/wgtun"
 )
@@ -53,12 +57,18 @@ func nativeWGResiduePresent() bool {
 // it must flag the entry rather than silently running plain WireGuard.
 func NativeAvailable() bool { return true }
 
-// useNativeWG reports whether this connect should run the native WireGuard
-// backend instead of the core. Only the WireGuard-class modes qualify: the
-// WARP identity in aether.toml is what the native tunnel reuses, and MASQUE /
-// Gool have no such identity.
+// useNativeWG reports whether this connect is carried by the native WireGuard
+// transport. It is driven by the EXIT, not by the protocol toggle: the native
+// backend is the transport of the Psiphon / Tor exits (the core runs those
+// backends on top of it, in its "no tunnel underneath it" mode) and is never a
+// shared underlay for the default exit. Deciding this from Mode alone is what
+// used to route the default exit through native WG/AWG — and what made the
+// toggle look like a per-protocol setting when it is really about the exit.
+//
+// StackedWireGuard (warp-in-warp) is a variant of the same transport and is
+// picked inside connectNativeExit.
 func (a *App) useNativeWG(s config.Settings) bool {
-	return s.NativeWireGuard && (s.Mode == config.ModeWARP || s.Mode == config.ModeWireGuard)
+	return vpn.NativeExitOnly(s) != ""
 }
 
 // nativeSessionAlive reports whether any native backend session is up. The
@@ -141,6 +151,19 @@ func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 			if cur := a.VPN.State().Status; cur == vpn.StatusReconnecting || cur == vpn.StatusConnected {
 				a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, "网络不通，请手动重连")
 			}
+			// A native exit MUST NOT survive the loss of its transport: with
+			// the tunnel gone, the core's backend would keep working through
+			// the physical link (WLAN) — a green UI whose traffic is not
+			// going anywhere near the tunnel. Fail the whole session instead.
+			if vpn.NativeExitOnly(s) != "" {
+				a.exitMu.Lock()
+				gen, active := a.exitGen, a.exitActive
+				a.exitMu.Unlock()
+				if active {
+					logx.Errorf("[app] native transport lost while exit=%s session #%d was live; rolling back", vpn.NativeExitOnly(s), gen)
+					a.rollbackNativeExit(gen, s, "传输层中断（Native 隧道已失效）")
+				}
+			}
 		}
 	}
 	if err := m.Start(ctx, cfg, nil); err != nil {
@@ -148,9 +171,286 @@ func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 		return err
 	}
 	a.nativeWG = m
+	logx.Infof("[app] native %s up (endpoint %s, mtu %d)", a.transportLabel(s), m.Current(), cfg.MTU)
+
+	// The transport is READY here — but it is not the EXIT. On a Psiphon/Tor
+	// exit this tunnel only carries the backend's traffic, so claiming
+	// Connected now would be exactly the "green UI, dead browser" failure:
+	// the backend has not even started. connectNativeExit owns the Connected
+	// transition in that case (and runs outside connMu, held here, so a
+	// Disconnect can interrupt a minutes-long bootstrap).
+	if vpn.NativeExitOnly(s) != "" {
+		return nil
+	}
 	a.VPN.SetNativeState(vpn.StatusConnected, s.Mode, "")
-	logx.Infof("[app] native WireGuard up (endpoint %s, mtu %d)", m.Current(), cfg.MTU)
 	return nil
+}
+
+// transportLabel names the transport this session actually runs, for logs —
+// "AWG" when the AmneziaWG obfuscation is on, "WG" for the plain baseline.
+func (a *App) transportLabel(s config.Settings) string {
+	if s.AWGJunk || (s.AWGI1 != "" && !strings.EqualFold(s.AWGI1, "none")) {
+		return "AWG"
+	}
+	return "WG"
+}
+
+// nativeExitReadyTimeout bounds the wait for the exit backend. Psiphon's own
+// budget in the core is AETHER_PSIPHON_READY_SECS (180) and Tor bootstraps on
+// its own clock (it fell back to bridges after 75s here), so this must be
+// generous — and it is only ever a ceiling: Disconnect aborts the wait.
+const nativeExitReadyTimeout = 240 * time.Second
+
+// connectNativeExit runs the core's documented "no tunnel underneath it"
+// backend on top of an already-established native WireGuard tunnel: the
+// backend dials out through the system route, which is now the tunnel.
+//
+// Order is load-bearing:
+//
+//	native WG ready -> core (only mode) -> backend ready -> system proxy -> Connected
+//
+// Every failure rolls the whole stack back (proxy released, core stopped,
+// orphan Psiphon reaped, native WG torn down) and returns Failed, so a half-up
+// chain can never look connected.
+func (a *App) connectNativeExit(ctx context.Context, s config.Settings) error {
+	backend := vpn.NativeExitOnly(s)
+	if backend == "" {
+		// Guard rail: the default exit must never reach this path.
+		return fmt.Errorf("internal: connectNativeExit called for the default exit")
+	}
+	transport := a.nativeTransportChoice(s)
+	// 1. Open the session FIRST, so everything after it (transport, core,
+	//    events) is attributable to one generation and can be invalidated.
+	gen := a.beginNativeExit(backend, transport)
+	logx.Infof("[app] exit=%s native_transport=%s (session #%d)", backend, transport, gen)
+
+	// 2. Native transport. AWG first: plain WireGuard is measurably easier to
+	//    block on this network, AmneziaWG is not. A single WG retry keeps the
+	//    plain transport available, and only that — no loop.
+	a.VPN.SetNativeState(vpn.StatusConnecting, s.Mode, "启动 "+strings.ToUpper(transport)+" 传输层")
+	if err := a.startNativeTransport(ctx, s, transport); err != nil {
+		if transport == nativeTransportAWG {
+			logx.Warnf("[app] exit=%s native_transport=awg failed (%v); falling back to wg once", backend, err)
+			transport = nativeTransportWG
+			a.exitMu.Lock()
+			a.exitTransport = transport
+			a.exitMu.Unlock()
+			if err2 := a.startNativeTransport(ctx, s, transport); err2 != nil {
+				a.rollbackNativeExit(gen, s, fmt.Sprintf("AWG 与 WG 传输层均失败：%v", err2))
+				return err2
+			}
+		} else {
+			a.rollbackNativeExit(gen, s, fmt.Sprintf("WG 传输层失败：%v", err))
+			return err
+		}
+	}
+	logx.Infof("[app] native %s up (exit=%s session #%d)", transport, backend, gen)
+
+	// 3. Only start the core while the session is still wanted: starting it
+	//    and then aborting is what left Psiphon bootstrapping on its own
+	//    (through WLAN, with the tunnel already gone).
+	if a.nativeExitAborted(gen) {
+		a.rollbackNativeExit(gen, s, "连接已取消（传输层就绪后、核心启动前）")
+		return fmt.Errorf("连接已取消（出口后端 %s 启动前）", backend)
+	}
+
+	// 4. Core in only mode. While this session is live, core events must NOT
+	//    promote it to Connected by themselves — the orchestration here owns
+	//    that transition (backend ready is only one of its preconditions).
+	a.VPN.SetConnectGate(func() bool { return a.nativeExitValid(gen) })
+	es := s
+	es.ExitChain = vpn.OnlyChainFor(s)
+	if err := a.VPN.Connect(es); err != nil {
+		err = fmt.Errorf("出口后端 %s 启动失败：%w", backend, err)
+		a.rollbackNativeExit(gen, s, err.Error())
+		return err
+	}
+
+	// 5. Wait for the backend AND for the HTTP port the core announced.
+	port, err := a.waitNativeExit(ctx, gen, backend)
+	if err != nil {
+		a.rollbackNativeExit(gen, s, err.Error())
+		return err
+	}
+	if a.nativeExitAborted(gen) {
+		a.rollbackNativeExit(gen, s, "连接已取消（后端就绪后）")
+		return fmt.Errorf("连接已取消（出口后端 %s）", backend)
+	}
+	if !portListening(port) {
+		err := fmt.Errorf("出口后端 %s 的 HTTP 代理 127.0.0.1:%d 未监听", backend, port)
+		a.rollbackNativeExit(gen, s, err.Error())
+		return err
+	}
+
+	// 6. System proxy LAST, only now that traffic can actually leave.
+	//    Windows speaks HTTP CONNECT here — the backend's HTTP port, never
+	//    the SOCKS port (1819) and never the chain ports (1821/1823).
+	if err := sysproxy.Take(sysproxy.Options{Server: fmt.Sprintf("127.0.0.1:%d", port)}); err != nil {
+		err = fmt.Errorf("系统代理接管失败：%w", err)
+		a.rollbackNativeExit(gen, s, err.Error())
+		return err
+	}
+	if a.nativeExitAborted(gen) {
+		a.rollbackNativeExit(gen, s, "连接已取消（系统代理设置后）")
+		return fmt.Errorf("连接已取消（出口后端 %s）", backend)
+	}
+	// 7. Connected — and only here.
+	a.VPN.SetNativeState(vpn.StatusConnected, s.Mode, "")
+	logx.Infof("[app] exit=%s native_transport=%s ready: system proxy -> 127.0.0.1:%d (session #%d)", backend, transport, port, gen)
+	return nil
+}
+
+// nativeTransport* are the two native transports. They are the SAME wintun
+// tunnel; they differ only in whether the AmneziaWG obfuscation is on.
+const (
+	nativeTransportAWG = "awg"
+	nativeTransportWG  = "wg"
+)
+
+// nativeTransportChoice picks the transport for a native exit. AWG is the
+// default (plain WireGuard is measurably easier to block); plain WG is chosen
+// only when the user explicitly turned the obfuscation off — AWGJunk off AND
+// I1 set to "none". Default settings (junk off, I1 empty) mean "not
+// configured", which must NOT be read as "user wants plain WG".
+func (a *App) nativeTransportChoice(s config.Settings) string {
+	if !s.AWGJunk && strings.EqualFold(strings.TrimSpace(s.AWGI1), "none") {
+		return nativeTransportWG
+	}
+	return nativeTransportAWG
+}
+
+// startNativeTransport brings the native transport up for a native exit, with
+// the chosen obfuscation applied. AWG reuses the existing wgtun AmneziaWG
+// support (junk + I1) — there is no second tunnel implementation.
+func (a *App) startNativeTransport(ctx context.Context, s config.Settings, transport string) error {
+	ts := s
+	switch transport {
+	case nativeTransportAWG:
+		// AWG on: junk + a QUIC-shaped first packet (warpscout's documented
+		// "start here" profile). Only fills in what the user left unset.
+		ts.AWGJunk = true
+		if ts.JunkCount <= 0 {
+			ts.JunkCount, ts.JunkMinSize, ts.JunkMaxSize = config.DefaultJunkCount, config.DefaultJunkMinSize, config.DefaultJunkMaxSize
+		}
+		if strings.TrimSpace(ts.AWGI1) == "" {
+			ts.AWGI1 = config.DefaultAWGI1
+		}
+	case nativeTransportWG:
+		// Plain WireGuard baseline: no junk, no fake first packet.
+		ts.AWGJunk = false
+		ts.AWGI1 = ""
+	}
+	if s.StackedWireGuard {
+		return a.connectNativeStacked(ctx, ts)
+	}
+	return a.connectNativeWG(ctx, ts)
+}
+
+// waitNativeExit waits until the exit backend reports ready AND has announced
+// the HTTP port the system proxy must use. It returns that port, or an error
+// when the backend failed, the wait was cancelled, or the budget ran out.
+func (a *App) waitNativeExit(ctx context.Context, gen uint64, backend string) (int, error) {
+	deadline := time.Now().Add(nativeExitReadyTimeout)
+	for time.Now().Before(deadline) {
+		if !a.nativeExitValid(gen) {
+			return 0, fmt.Errorf("会话 #%d 已失效（出口后端 %s 启动中）", gen, backend)
+		}
+		if a.nativeExitAborted(gen) {
+			// Disconnect landed mid-bootstrap: rollback (below) stops the
+			// core, so nothing keeps bootstrapping in the background.
+			return 0, fmt.Errorf("连接已取消（出口后端 %s 启动中）", backend)
+		}
+		switch a.VPN.State().Status {
+		case vpn.StatusFailed:
+			return 0, fmt.Errorf("出口后端 %s 未就绪：%s", backend, a.VPN.State().Error)
+		default:
+			// backend ready is a state, not the status: with the gate in
+			// place the core's own ready event only sets BackendReady, and
+			// the HTTP port it announced is what the proxy must use. Tor's
+			// port in particular is NEVER assumed (1824 was never measured).
+			if a.VPN.BackendReady() {
+				if port := a.VPN.ExitHTTPPort(); port > 0 {
+					return port, nil
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return 0, fmt.Errorf("出口后端 %s 启动被取消", backend)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return 0, fmt.Errorf("出口后端 %s 在 %v 内未就绪（未报告 HTTP 代理端口）", backend, nativeExitReadyTimeout)
+}
+
+// rollbackNativeExit tears the whole native exit stack down:
+//
+//	invalidate session -> release system proxy -> stop core (+ reap orphan
+//	Psiphon/Tor) -> stop native transport -> Failed
+//
+// It is idempotent AND staleness-safe: endNativeExit(gen) returns false when
+// the session was already ended or superseded, in which case nothing is torn
+// down — a late rollback must never dismantle a newer session, and calling it
+// twice must not double-release or panic.
+//
+// Stopping the core is the part that matters most: the previous version only
+// tore down the tunnel on the abort path, which is exactly how Psiphon ended
+// up finishing its bootstrap and leaving through WLAN with no tunnel under it.
+func (a *App) rollbackNativeExit(gen uint64, s config.Settings, reason string) {
+	if !a.endNativeExit(gen) {
+		logx.Infof("[app] native exit session #%d already ended (rollback skipped): %s", gen, reason)
+		return
+	}
+	logx.Errorf("[app] native exit session #%d failed (%s); rolling the whole stack back", gen, reason)
+	// The gate must go before the core stops, so no event of this session can
+	// promote anything while teardown runs.
+	a.VPN.SetConnectGate(nil)
+	if err := sysproxy.Release(); err != nil {
+		logx.Warnf("[app] system proxy release failed: %v", err)
+	}
+	a.VPN.Disconnect() // core stop + killOrphanPsiphon/Tor + state reset
+	a.disconnectNativeWG()
+	a.disconnectNativeStacked()
+	a.VPN.SetNativeState(vpn.StatusFailed, s.Mode, reason)
+}
+
+// nativeExitAborted reports whether the user (or a Disconnect) has abandoned
+// this session: if so every remaining step must stop and roll back.
+func (a *App) nativeExitAborted(gen uint64) bool {
+	if !a.nativeExitValid(gen) {
+		return true
+	}
+	a.connMu.Lock()
+	wg := a.nativeWG
+	a.connMu.Unlock()
+	if wg == nil && !a.stackedAlive() {
+		return true // the transport was already torn down
+	}
+	if !a.connecting.Load() {
+		return true // Disconnect resets the connect guard
+	}
+	switch a.VPN.State().Status {
+	case vpn.StatusDisconnected:
+		return true
+	}
+	return false
+}
+
+// stackedAlive reports whether a stacked (warp-in-warp) session is up.
+func (a *App) stackedAlive() bool {
+	a.connMu.Lock()
+	defer a.connMu.Unlock()
+	return a.nativeStacked != nil
+}
+
+// portListening reports whether 127.0.0.1:port accepts a TCP connection.
+func portListening(port int) bool {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 // refreshNativeExitInfo fills exit IP / country / flag / latency for the NATIVE
@@ -166,10 +466,20 @@ func (a *App) connectNativeWG(ctx context.Context, s config.Settings) error {
 func (a *App) refreshNativeExitInfo() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// Proxy: nil — the request must ride the system routing table, which the
-	// native backend just flipped onto the tunnel. A system proxy would detour
-	// it and report the wrong egress.
+	// With no exit backend the request rides the system routing table, which
+	// the native backend just flipped onto the tunnel (so Proxy: nil is the
+	// tunnel). With a Psiphon/Tor backend on top, the tunnel is only the
+	// transport: the EXIT is the backend, and the only way to see it is to go
+	// through the HTTP port the core announced — otherwise we would report the
+	// WARP egress while the browser leaves through Psiphon/Tor.
 	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	if port := a.VPN.ExitHTTPPort(); port > 0 {
+		proxyURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+		if err == nil {
+			client.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+			logx.Infof("[app] native exit info via backend proxy 127.0.0.1:%d", port)
+		}
+	}
 
 	ip, loc, colo := traceExit(ctx, client)
 	if ip == "" {
