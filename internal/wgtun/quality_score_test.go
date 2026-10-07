@@ -32,8 +32,8 @@ func TestStabilityScoreLifetimeAndFailures(t *testing.T) {
 		FirstSeen:        qNow.Add(-24 * time.Hour),
 		LastDataPlaneOK:  qNow,
 	}
-	if s := stable.stabilityScore(qNow); s != 30 {
-		t.Fatalf("stable = %v, want 30", s)
+	if s := stable.stabilityScore(qNow); s != 25 {
+		t.Fatalf("stable = %v, want 25", s)
 	}
 	if s := (endpointEntry{}).stabilityScore(qNow); s != 0 {
 		t.Fatalf("fresh = %v, want 0", s)
@@ -71,8 +71,8 @@ func TestFreshnessScoreDecay(t *testing.T) {
 	if z := (endpointEntry{}).freshnessScore(qNow); z != 0 {
 		t.Fatalf("zero-timestamp freshness = %v, want 0", z)
 	}
-	if fut := (endpointEntry{LastDataPlaneOK: qNow.Add(time.Hour)}).freshnessScore(qNow); fut != 15 {
-		t.Fatalf("future freshness = %v, want 15 (clamped to age 0)", fut)
+	if fut := (endpointEntry{LastDataPlaneOK: qNow.Add(time.Hour)}).freshnessScore(qNow); fut != 12 {
+		t.Fatalf("future freshness = %v, want 12 (clamped to age 0)", fut)
 	}
 }
 
@@ -90,8 +90,8 @@ func TestReliabilityScoreDistinguishesCount(t *testing.T) {
 // floor) and lower real handshake latency scores higher.
 func TestLatencyScoreNeutralAndRank(t *testing.T) {
 	missing := (endpointEntry{}).latencyScore()
-	if missing != 3.5 {
-		t.Fatalf("neutral latency = %v, want 3.5", missing)
+	if missing != 3 {
+		t.Fatalf("neutral latency = %v, want 3", missing)
 	}
 	fast := endpointEntry{LastHandshakeMs: 400}.latencyScore()
 	slow := endpointEntry{LastHandshakeMs: 5000}.latencyScore()
@@ -100,15 +100,18 @@ func TestLatencyScoreNeutralAndRank(t *testing.T) {
 	}
 }
 
-// TestSpeedScoreNeutralAndRank pins the small speed component and its neutral default.
+// TestSpeedScoreNeutralAndRank pins the log-scaled speed component and its
+// neutral default. The log scale keeps 10 vs 200 Mbps visibly distinct, unlike
+// the old flat Mbps/50 clamp that made every 50+ Mbps endpoint score the same.
 func TestSpeedScoreNeutralAndRank(t *testing.T) {
-	if m := (endpointEntry{}).speedScore(); m != 1.5 {
-		t.Fatalf("neutral speed = %v, want 1.5", m)
+	if m := (endpointEntry{}).speedScore(); m != 7.5 {
+		t.Fatalf("neutral speed = %v, want 7.5", m)
 	}
+	full := endpointEntry{LastSpeedMbps: 200}.speedScore()
 	fast := endpointEntry{LastSpeedMbps: 100}.speedScore()
 	slow := endpointEntry{LastSpeedMbps: 10}.speedScore()
-	if fast != 3 || slow >= fast {
-		t.Fatalf("speed ranking wrong: fast=%v slow=%v", fast, slow)
+	if full != 15 || fast >= full || slow >= fast {
+		t.Fatalf("speed ranking wrong: full=%v fast=%v slow=%v", full, fast, slow)
 	}
 }
 

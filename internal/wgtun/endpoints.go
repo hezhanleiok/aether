@@ -17,11 +17,12 @@ import (
 
 // cfIPv4Prefixes are the WARP /24 prefixes the reference scanner (E:\warp) probes
 // with full /24 coverage and which it has proven live on this host (96 Mbps
-// connects). It deliberately omits the 8.x segments that warpscout's pools.go
-// listed — those drifted out of the live WARP pool, while 162.159.x / 188.114.x
-// still carry the endpoints that both the Aether core and the reference scanner
-// connect through.
+// connects). The 8.x segments are restored (2026-10-08): they carry live WARP
+// endpoints per git history but had drifted out of an earlier prefix list, which
+// silently starved the candidate pool of a whole /24 family.
 var cfIPv4Prefixes = []string{
+	"8.6.112", "8.34.70", "8.34.146", "8.35.211",
+	"8.39.125", "8.39.204", "8.39.214", "8.47.69",
 	"162.159.192", "162.159.193", "162.159.195",
 	"188.114.96", "188.114.97", "188.114.98", "188.114.99",
 }

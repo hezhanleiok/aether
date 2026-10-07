@@ -100,6 +100,7 @@ type endpointEntry struct {
 	DataPlaneFail    int       `json:"dataPlaneFail,omitempty"`    // data-plane failure count
 	ConsecDPFail     int       `json:"consecDPFail,omitempty"`     // consecutive data-plane failures
 	LastSpeedMbps    float64   `json:"lastSpeedMbps,omitempty"`    // last measured throughput
+	SpeedSampleAt    time.Time `json:"speedSampleAt,omitempty"`    // when LastSpeedMbps was last sampled
 	LastDataPlaneOK  time.Time `json:"lastDataPlaneOK,omitempty"`  // last data-plane success time
 	LastSeen         time.Time `json:"lastSeen,omitempty"`         // last liveness/verification observation
 }
@@ -172,13 +173,20 @@ func (e endpointEntry) successRate() float64 {
 // fast-but-short-lived node can never outrank a long-stable one.
 // ---------------------------------------------------------------------------
 
+// The speed weight is the highest a verified-throughput score can reach while
+// still keeping the core P5 invariant (TestStableBeatsFastShortLived): a
+// long-stable but slow endpoint must outrank a fast but just-created one. The
+// stability side (validation + stability + reliability) must outweigh a full
+// speed score by enough margin — raising speed above ~15 lets a one-sample
+// fast-but-short-lived node flip the ordering, which is exactly the failure the
+// 2026-10-05 quality model was built to prevent.
 const (
-	qualityValidationWeight  = 30.0 // data-plane verified vs handshake-only vs liveness-only
-	qualityStabilityWeight   = 30.0 // long-term stability (repeated data-plane success + lifetime)
-	qualityFreshnessWeight   = 15.0 // recency of last data-plane success (half-life decay)
-	qualityReliabilityWeight = 15.0 // Laplace-smoothed handshake success rate
-	qualityLatencyWeight     = 7.0  // real handshake latency
-	qualitySpeedWeight       = 3.0  // measured throughput (least important)
+	qualityValidationWeight  = 25.0 // data-plane verified vs handshake-only vs liveness-only
+	qualityStabilityWeight   = 25.0 // long-term stability (repeated data-plane success + lifetime)
+	qualityFreshnessWeight   = 12.0 // recency of last data-plane success (half-life decay)
+	qualityReliabilityWeight = 12.0 // Laplace-smoothed handshake success rate
+	qualityLatencyWeight     = 6.0  // real handshake latency
+	qualitySpeedWeight       = 15.0 // measured throughput (log-scaled; dominant among verified peers)
 )
 
 // endpointQualityHalfLife is the freshness half-life: a data-plane success ages
@@ -188,7 +196,13 @@ const endpointQualityHalfLife = 24 * time.Hour
 // Reference points that map a quality field to the bottom/top of its component.
 const (
 	qualityLatencyRefMs = 6000.0 // LastHandshakeMs at which latencyScore → 0
-	qualitySpeedRefMbps = 50.0   // LastSpeedMbps at which speedScore → full
+	// Speed is mapped on a LOG scale between two reference points, so a 20x
+	// throughput gap (10 vs 200 Mbps) is not collapsed into a single linear
+	// clamp the way a flat Mbps/50 did (which made every 50+ Mbps endpoint
+	// score identical). Low/high anchor the curve: at or below Low → 0, at or
+	// above High → full component weight.
+	qualitySpeedRefLowMbps  = 5.0
+	qualitySpeedRefHighMbps = 200.0
 )
 
 // validationScore rewards an endpoint whose DATA PLANE was actually verified,
@@ -256,13 +270,22 @@ func (e endpointEntry) latencyScore() float64 {
 	return qualityLatencyWeight * clamp01(1-float64(e.LastHandshakeMs)/qualityLatencyRefMs)
 }
 
-// speedScore maps measured throughput (LastSpeedMbps) into a small component.
-// Missing speed is neutral; it is the LAST tie-break by design.
+// speedScore maps measured throughput (LastSpeedMbps) into its component on a
+// LOG scale. Linear Mbps/ref collapsed everything above 50 Mbps to the same
+// score; log scaling keeps 10/30/100/200 Mbps visibly distinct while still
+// saturating (so a one-off 500 Mbps reading does not dominate forever). Missing
+// speed is neutral, so a newly observed node is not punished for data it has
+// not produced yet.
 func (e endpointEntry) speedScore() float64 {
 	if e.LastSpeedMbps <= 0 {
 		return qualitySpeedWeight * 0.5
 	}
-	return qualitySpeedWeight * clamp01(e.LastSpeedMbps/qualitySpeedRefMbps)
+	if e.LastSpeedMbps <= qualitySpeedRefLowMbps {
+		return 0
+	}
+	lo := math.Log2(qualitySpeedRefLowMbps)
+	hi := math.Log2(qualitySpeedRefHighMbps)
+	return qualitySpeedWeight * clamp01((math.Log2(e.LastSpeedMbps)-lo)/(hi-lo))
 }
 
 // qualityScore is the total 0-100 endpoint quality, the P5.2 Healthy Pool sort
@@ -464,18 +487,26 @@ func (c *endpointCache) recordDataPlane(addr string, ok bool) {
 	}
 }
 
-// recordSpeed records the last measured throughput for an endpoint. It only
-// ever writes LastSpeedMbps (never SuccessCount/Attempts, never a synthetic
-// speed from liveEndpoint.Speed), so it cannot forge successRate.
+// recordSpeed records a measured throughput for an endpoint as an exponential
+// moving average, so one transiently congested sample cannot permanently demote
+// (or over-promote) an endpoint. A non-positive sample is a failed measurement
+// and is dropped, never written. It only ever writes LastSpeedMbps/SpeedSampleAt
+// (never SuccessCount/Attempts, never a synthetic speed from liveEndpoint.Speed),
+// so it cannot forge successRate.
 func (c *endpointCache) recordSpeed(addr string, mbps float64) {
-	if addr == "" {
+	if addr == "" || mbps <= 0 {
 		return
 	}
 	for i := range c.Endpoints {
 		if c.Endpoints[i].Addr != addr {
 			continue
 		}
-		c.Endpoints[i].LastSpeedMbps = mbps
+		if old := c.Endpoints[i].LastSpeedMbps; old > 0 {
+			c.Endpoints[i].LastSpeedMbps = 0.5*old + 0.5*mbps
+		} else {
+			c.Endpoints[i].LastSpeedMbps = mbps
+		}
+		c.Endpoints[i].SpeedSampleAt = time.Now()
 		c.Endpoints[i].LastSeen = time.Now()
 		return
 	}
