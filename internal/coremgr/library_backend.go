@@ -27,12 +27,12 @@ type LibraryBackend struct {
 }
 
 type procs struct {
-	version    *syscall.LazyProc
-	strFree    *syscall.LazyProc
-	coreStart  *syscall.LazyProc
-	jobPoll    *syscall.LazyProc
-	jobCancel  *syscall.LazyProc
-	jobFree    *syscall.LazyProc
+	version   *syscall.LazyProc
+	strFree   *syscall.LazyProc
+	coreStart *syscall.LazyProc
+	jobPoll   *syscall.LazyProc
+	jobCancel *syscall.LazyProc
+	jobFree   *syscall.LazyProc
 }
 
 func NewLibraryBackend() *LibraryBackend { return &LibraryBackend{} }
@@ -88,12 +88,12 @@ func (b *LibraryBackend) load(dllPath string) error {
 		jobFree:   dll.NewProc("aether_job_free"),
 	}
 	for name, proc := range map[string]*syscall.LazyProc{
-		"aether_version":    p.version,
+		"aether_version":     p.version,
 		"aether_string_free": p.strFree,
-		"aether_core_start": p.coreStart,
-		"aether_job_poll":   p.jobPoll,
-		"aether_job_cancel": p.jobCancel,
-		"aether_job_free":   p.jobFree,
+		"aether_core_start":  p.coreStart,
+		"aether_job_poll":    p.jobPoll,
+		"aether_job_cancel":  p.jobCancel,
+		"aether_job_free":    p.jobFree,
 	} {
 		if err := proc.Find(); err != nil {
 			return fmt.Errorf("dll lacks %s: %w", name, err)
@@ -108,7 +108,10 @@ func (b *LibraryBackend) takeString(p uintptr) string {
 		return ""
 	}
 	defer b.procs.strFree.Call(p)
-	return windows.BytePtrToString((*byte)(unsafe.Pointer(p)))
+	// p is a core-allocated address handed back across the FFI boundary
+	// (a uintptr by ABI), not a Go heap pointer; rebuild the byte pointer via
+	// unsafe.Add so the conversion stays within the safe Pointer API.
+	return windows.BytePtrToString((*byte)(unsafe.Add(unsafe.Pointer(nil), p)))
 }
 
 // ProbeVersion calls aether_version.
