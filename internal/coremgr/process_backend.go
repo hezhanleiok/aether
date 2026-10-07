@@ -282,10 +282,12 @@ var classifyRePsiphonExit = regexp.MustCompile("psiphon through the tunnel exit:
 var classifyRePsiphonFail = regexp.MustCompile("psiphon did not come up|psiphon stopped before|psiphon found no usable|psiphon would not start|psiphon has no working|psiphon could not")
 
 // Routine psiphon notices that merely contain the word "failed" (a probe
-// disconnecting: "AcceptSocks: socksPeekByte() failed: EOF") or that are pure
-// bookkeeping. They used to fall through to the generic failure rule and
-// flipped a perfectly working chain to "Failed" in the UI.
-var classifyRePsiphonNoise = regexp.MustCompile(`psiphon: (SOCKS proxy accept error|Config migration|Memory metrics|.*relayHTTPRequest)`)
+// disconnecting: "AcceptSocks: socksPeekByte() failed: EOF", or a tactics
+// fetch failure — tactics is a non-fatal best-effort optimisation Psiphon
+// retries) or that are pure bookkeeping. They used to fall through to the
+// generic failure rule and flipped a perfectly working chain to "Failed" in
+// the UI.
+var classifyRePsiphonNoise = regexp.MustCompile(`psiphon: (SOCKS proxy accept error|Config migration|Memory metrics|.*relayHTTPRequest|tactics request failed)`)
 
 // Aether reports fatal startup failures on stderr as either "[-] ..." or
 // "Error: Other(...)".  The latter includes bind failures (for example a

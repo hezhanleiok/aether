@@ -170,3 +170,51 @@ func TestLogSinkAndEvents(t *testing.T) {
 		t.Errorf("log sink got %v", got)
 	}
 }
+
+// TestClassifyPsiphonEvents pins the log-line classifier at the psiphon stage.
+// The tactics line is the regression this exercise fixed: a tactics fetch
+// failure is a non-fatal best-effort warning in Psiphon (it retries), so it
+// must NOT become a "failed" event that rolls the session back. Real psiphon
+// failures and the ready signal must keep their exact classifications.
+func TestClassifyPsiphonEvents(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want string // event kind; empty means "no event" (ok=false)
+	}{
+		{
+			name: "tactics fetch failure is non-fatal noise",
+			line: "[-] psiphon: tactics request failed: psiphon.GetTactics#166: unexpected response status code: 404",
+			want: "",
+		},
+		{
+			name: "real failure: did not come up",
+			line: "psiphon did not come up",
+			want: "psiphon_failed",
+		},
+		{
+			name: "real failure: found no usable",
+			line: "psiphon found no usable",
+			want: "psiphon_failed",
+		},
+		{
+			name: "ready",
+			line: "psiphon is ready",
+			want: "psiphon_ready",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, ok := classify(tc.line)
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("classify(%q) = (%q, true), want no event", tc.line, kind)
+				}
+				return
+			}
+			if !ok || kind != tc.want {
+				t.Fatalf("classify(%q) = (%q, %v), want (%q, true)", tc.line, kind, ok, tc.want)
+			}
+		})
+	}
+}
