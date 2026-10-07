@@ -4,6 +4,7 @@ package wgtun
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -129,6 +130,46 @@ func TestFailoverAbortsWhenStopRequested(t *testing.T) {
 	m.stopReq.Store(true)
 	if m.failover() {
 		t.Fatal("failover with stop requested must return false immediately")
+	}
+}
+
+// TestRecordProbedNeutral pins the P1 cold-start persistence contract:
+// recordProbed must persist probe-live candidates as NEUTRAL entries (no forged
+// success rate) and cap the set, so the next connect's fast path tries them
+// before a full sweep without ever believing they are proven.
+func TestRecordProbedNeutral(t *testing.T) {
+	origDir := stateDir
+	stateDir = t.TempDir()
+	defer func() { stateDir = origDir }()
+
+	recordProbed([]liveEndpoint{
+		{Addr: "1.1.1.1:2408", Latency: 42},
+		{Addr: "1.1.1.2:2408", Latency: 55},
+	})
+	c := loadCache()
+	if len(c.Endpoints) != 2 {
+		t.Fatalf("recordProbed persisted %d entries, want 2", len(c.Endpoints))
+	}
+	for _, e := range c.Endpoints {
+		if e.Attempts != 0 || e.SuccessCount != 0 {
+			t.Fatalf("neutral entry %s forged a success rate: attempts=%d success=%d", e.Addr, e.Attempts, e.SuccessCount)
+		}
+		if got := e.successRate(); got != 0.5 {
+			t.Fatalf("neutral entry %s successRate = %v, want 0.5", e.Addr, got)
+		}
+	}
+
+	// Capping: one recordProbed call never adds more than maxHandshakeCandidates
+	// entries (a single sweep must not grow the cache without bound). Use a
+	// fresh state dir so the first batch's 2 entries don't count.
+	stateDir = t.TempDir()
+	big := make([]liveEndpoint, 0, maxHandshakeCandidates+5)
+	for i := 0; i < maxHandshakeCandidates+5; i++ {
+		big = append(big, liveEndpoint{Addr: fmt.Sprintf("2.2.2.%d:2408", i)})
+	}
+	recordProbed(big)
+	if got := len(loadCache().Endpoints); got != maxHandshakeCandidates {
+		t.Fatalf("recordProbed added %d entries, want cap %d", got, maxHandshakeCandidates)
 	}
 }
 

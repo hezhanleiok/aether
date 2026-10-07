@@ -24,6 +24,13 @@ type Manager struct {
 	tunnel *tunnel
 	routes *routeManager
 
+	// socks is the tunnel-bound SOCKS5 child of the live session. It is created
+	// by StartTunnelSocks and torn down by Stop; both mutate the field under
+	// m.mu, but the actual close runs OUTSIDE the lock (see Stop). Endpoint
+	// failover never touches it: it keeps the same *tunnel, source addresses
+	// and DNS, so the same TunnelDialer and TunnelSocks stay valid.
+	socks *TunnelSocks
+
 	// current is the endpoint the live session is using. It moves when failover
 	// succeeds, and is what failover picks the next candidate relative to.
 	current string
@@ -94,6 +101,9 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	// session's failover must not be born already-aborted.
 	m.stopReq.Store(false)
 	m.gen++
+	// Monotonic connect-stage clock (the observable A/B seam for P0/P1/P2):
+	// every phase reports cumulative elapsed_ms from native_connect_start.
+	pt := newPhaseTimer(nativeKind(cfg))
 
 	// Self-check (connect-time): recover any route/metric/DNS left behind by a
 	// previous unclean exit before touching the system again. Unlike the
@@ -142,13 +152,19 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 		logx.Infof("[wgtun] dropped %d cached endpoints the current pool no longer generates", removed)
 	}
 
+	pt.mark("endpoint_discovery_start")
 	cands, fromSweep, err := probeCandidates(ctx, cfg, "", false, onPhase)
 	if err != nil {
 		return err
 	}
-	cfg.Endpoint = cands[0].Addr
+	pt.mark("endpoint_discovery_done")
 
-	// Create the wintun adapter + device against the first candidate.
+	// Create the wintun adapter + device against the first candidate. The
+	// adapter is created ONCE; the peer endpoint is hot-switched across the
+	// candidates by handshakeCandidates below — never one adapter per candidate,
+	// and never a second production tunnel.
+	cfg.Endpoint = cands[0].Addr
+	pt.mark("real_tunnel_start")
 	t, err := New(cfg)
 	if err != nil {
 		return err
@@ -158,41 +174,21 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 		return err
 	}
 
-	// HARD GATE: the real tunnel must complete its own handshake before the
-	// default route flips. If it cannot (endpoint drifted during the adapter
-	// build, or Cloudflare rejected it), hot-switch to the next candidate and
-	// retry — then, only if every candidate failed, do a full-pool UDP sweep
-	// and retry those too. Taking over the default route without a completed
-	// handshake black-holes every packet on the machine (the "connected then
-	// whole link died" failure: DUMP-TUN showed traffic entering the TUN while
-	// every send hit "no usable keypair").
-	// Cached endpoints get a short deadline (6s covers WireGuard's 5s retransmit
-	// plus a slow RTT): a stale cache entry should fail fast so the sweep starts
-	// sooner. Swept endpoints are known-live, so they get the full deadline.
-	//
-	// fromSweep — not the call site — decides which one applies: when the fast
-	// path finds no survivors, probeCandidates falls through and runs the sweep
-	// INTERNALLY, so its results are swept candidates even though this is the
-	// "fast path" call. Passing them the 6s deadline meant for stale cache
-	// entries was silently killing endpoints that only needed WireGuard's 5s
-	// retransmit to land (observed 2026-10-05: three swept candidates each
-	// failed at exactly 6s, the fourth connected).
-	deadline := 6 * time.Second
-	if fromSweep {
-		deadline = handshakeTimeout
+	// Real handshake. Warm path (cached/seed) gets a short deadline so a stale
+	// entry fails fast; cold path (sweep) — or a warm path whose candidates all
+	// failed — re-discovers via the full sweep and then ranks the survivors with
+	// a PARALLEL disposable handshake, so the real tunnel only ever handshakes
+	// candidates that already completed one (never a serial 14s x N).
+	pt.mark("real_handshake_start")
+	handshake := func(cs []liveEndpoint, timeout time.Duration) (string, error) {
+		return handshakeAcross(t, cs, timeout)
 	}
-	connected, err := handshakeAcross(t, cands, deadline)
-	if err != nil && ctx.Err() == nil {
-		logx.Infof("[wgtun] cached/seed candidates all failed (%v); running full sweep", err)
-		swept, _, serr := probeCandidates(ctx, cfg, "", true, onPhase)
-		if serr == nil {
-			connected, err = handshakeAcross(t, swept, handshakeTimeout)
-		}
-	}
+	connected, err := handshakeCandidates(ctx, cfg, cands, fromSweep, onPhase, pt, handshake, t.setEndpoint)
 	if err != nil {
 		_ = t.Down()
 		return fmt.Errorf("wgtun: no endpoint completed a real-tunnel handshake: %w", err)
 	}
+	pt.mark("real_handshake_done")
 
 	// Only now touch routing/DNS, against the endpoint that actually worked.
 	rm := newRouteManager(t.luid(), cfg.DNS)
@@ -210,6 +206,7 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 		}
 	}()
 
+	pt.mark("route_start")
 	if err := rm.ApplyEndpointRoute(connected); err != nil {
 		_ = t.Down()
 		return err
@@ -230,14 +227,17 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 		_ = t.Down()
 		return err
 	}
+	pt.mark("route_done")
 	// Takeover, part 2 of 3: DNS on the tunnel adapter (1.1.1.1 / 1.0.0.1 via
 	// its registry NameServer). Which server the resolver actually queries
 	// follows adapter priority, so this only takes effect once part 1 has made
 	// the tunnel adapter the preferred one — hence the order.
+	pt.mark("dns_start")
 	if err := rm.ApplyDNS(); err != nil {
 		_ = t.Down()
 		return err
 	}
+	pt.mark("dns_done")
 	// Takeover, part 3 of 3: prove it. A tunnel that is up but does not own
 	// 0.0.0.0/0 is the worst possible failure — the UI says Connected while
 	// every packet leaves through the physical NIC (2026-10-06: DNS still
@@ -262,10 +262,37 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	// (1.1.1.1) itself rides the tunnel, so a DNS-based probe would deadlock
 	// against the very thing it is testing and report "data plane dead" for
 	// what is really a name-resolution stall.
-	if err := probeTunnelDataPlane(5 * time.Second); err != nil {
-		_ = t.Down()
-		return fmt.Errorf("wgtun: tunnel handshake ok but data plane dead (reverted): %w", err)
+	// Data-plane readiness gate (P2): ONE quick probe gates Connected. A
+	// healthy tunnel answers in a single round trip, so this is normally
+	// sub-second. The full retry loop (probeTunnelDataPlane, short-interval
+	// polling over a bounded settle window) exists only to tell "transiently
+	// unreachable right after the flip" (WSAENETUNREACH) from "genuinely dead",
+	// so it is kept as the FALLBACK rather than the common path. Ongoing
+	// verification is the health monitor's job once the session is up
+	// (startHealthMonitor below), so a tunnel that degrades after connect is
+	// failed over there, not left green.
+	pt.mark("data_plane_start")
+	if err := probeOnceCtx(ctx, dataPlaneReadinessTimeout); err != nil {
+		if err := probeTunnelDataPlane(ctx, 5*time.Second); err != nil {
+			// P5.1: one FINAL data-plane outcome, not one per 300ms retry. A
+			// connect-time failure is recorded (DataPlaneFail/ConsecDPFail) but
+			// NEVER evicts — only the failover path may judge an endpoint dead.
+			func() {
+				c := loadCache()
+				c.recordDataPlane(connected, false)
+				c.save()
+			}()
+			_ = t.Down()
+			return fmt.Errorf("wgtun: tunnel handshake ok but data plane dead (reverted): %w", err)
+		}
 	}
+	// P5.1: data-plane verified — record the success (once per connect).
+	func() {
+		c := loadCache()
+		c.recordDataPlane(connected, true)
+		c.save()
+	}()
+	pt.mark("data_plane_ready")
 	logx.Infof("[wgtun] data plane verified (IP reachability through %s)", connected)
 
 	// Speed sample is best-effort: it needs a hostname (DNS through the tunnel),
@@ -302,6 +329,13 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	m.routes = rm
 	m.current = connected
 	logx.Infof("[wgtun] connected via %s", connected)
+	// P4: this endpoint just carried a FULL verified session (real handshake +
+	// route takeover + data-plane probe all passed — we only reach here after
+	// the data-plane gate). Record it as last-known-good so the next connect
+	// fast-paths onto it instead of sweeping. Deliberately NOT tied to
+	// SuccessCount accounting (that is handshakeAcross's job); it is a separate
+	// "data plane proven" fact.
+	recordLastGood(connected)
 
 	// Endpoints die on their own (DPI, drift, blocked port), so a connect that
 	// succeeded once is not a session that stays up: watch it and fail over to
@@ -311,6 +345,7 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	if HealthMonitor {
 		m.startHealthMonitor()
 	}
+	pt.mark("native_connected")
 	return nil
 }
 
@@ -685,16 +720,26 @@ func (m *Manager) Current() string {
 // reaching a bare address across it. Any HTTP response counts as success — the
 // point is round-trip reachability, not a specific payload — and the target is
 // an IP so the check never depends on the tunnel's own DNS.
-// dataPlaneAttempts is how many times the post-connect reachability probe is
-// retried before the connect is declared dead. It is >1 because the probe runs
-// within a second or two of the route flip, and Windows can answer
-// WSAENETUNREACH ("unreachable host") for that brief window even on a tunnel
-// that then carries traffic perfectly (observed 2026-10-04 on 8.35.211.174:500,
-// where a single probe killed an otherwise healthy connect). A transient must
-// never revert a working tunnel.
-const dataPlaneAttempts = 3
+//
+// The retry cadence exists because of how Windows behaves right after the
+// default-route flip (observed 2026-10-06): sockets answer WSAENETUNREACH
+// ("unreachable host") for ~1.5-3s while the route/FIB path converges, even on
+// a tunnel that then carries traffic perfectly. Those failures are IMMEDIATE
+// (not timeout-bound), so a short poll interval detects the moment the path
+// converges instead of sleeping 1.5s blindly past it — while a genuinely dead
+// data plane (a real timeout) fails on its first attempt rather than being
+// retried three times.
+const dataPlaneReadinessTimeout = 3 * time.Second
 
-func probeTunnelDataPlane(timeout time.Duration) error {
+// dataPlaneRetryInterval is the short poll gap between data-plane probes. It is
+// a var so tests can shrink it.
+var dataPlaneRetryInterval = 300 * time.Millisecond
+
+// dataPlaneSettleWindow bounds how long the probe keeps riding out the
+// post-flip route/FIB convergence. It is a var so tests can shrink it.
+var dataPlaneSettleWindow = 3 * time.Second
+
+func probeTunnelDataPlane(ctx context.Context, timeout time.Duration) error {
 	client := &http.Client{
 		Timeout: timeout,
 		// Do NOT follow redirects: 1.1.1.1 answers plain HTTP with a 301 to
@@ -709,22 +754,33 @@ func probeTunnelDataPlane(timeout time.Duration) error {
 		// detour the probe and measure the wrong path.
 		Transport: &http.Transport{Proxy: nil},
 	}
+	// Poll until the path converges, a probe succeeds, the connect is
+	// cancelled, or the settle window runs out. Success and cancel both stop
+	// immediately; the settle window only caps the blind polling that rides out
+	// a transient WSAENETUNREACH.
+	deadline := time.Now().Add(dataPlaneSettleWindow)
 	var lastErr error
-	for attempt := 1; attempt <= dataPlaneAttempts; attempt++ {
-		if err := probeOnceWith(client, timeout); err == nil {
+	for attempt := 1; ; attempt++ {
+		if err := probeOnceWithFn(client, timeout); err == nil {
 			if attempt > 1 {
-				logx.Infof("[wgtun] data plane verified on attempt %d/%d", attempt, dataPlaneAttempts)
+				logx.Infof("[wgtun] data plane verified on attempt %d", attempt)
 			}
 			return nil
 		} else {
 			lastErr = err
-			logx.Warnf("[wgtun] data plane probe attempt %d/%d failed: %v", attempt, dataPlaneAttempts, err)
+			logx.Warnf("[wgtun] data plane probe attempt %d failed: %v", attempt, err)
 		}
-		if attempt < dataPlaneAttempts {
-			time.Sleep(1500 * time.Millisecond)
+		// Context-aware short interval: a cancelled connect returns immediately
+		// instead of sleeping out the whole retry gap.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(dataPlaneRetryInterval):
+		}
+		if time.Now().After(deadline) {
+			return lastErr
 		}
 	}
-	return lastErr
 }
 
 // probeOnce is the single-shot form of the data-plane probe, used by the health
@@ -773,6 +829,69 @@ func probeOnceWith(client *http.Client, timeout time.Duration) error {
 	return nil
 }
 
+// probeOnceWithFn is the injectable seam for the single data-plane probe. It is
+// a var (not a direct call) so the retry cadence can be tested offline without
+// touching the network.
+var probeOnceWithFn = probeOnceWith
+
+// handshakeCandidates orchestrates the real tunnel's handshake. Warm path
+// (fromSweep false): cached/seed candidates get a short deadline so a stale
+// entry fails fast. Cold path (fromSweep true) — or a warm path whose candidates
+// all failed — re-discovers via the full sweep and then ranks the survivors with
+// a PARALLEL disposable handshake, dropping every candidate that cannot handshake
+// so the real tunnel never burns a full handshakeTimeout on it. handshake and
+// setEndpoint are the real-tunnel seams (handshakeAcross / t.setEndpoint in
+// production; fakes in tests). Returns the first endpoint whose REAL handshake
+// completed.
+func handshakeCandidates(
+	ctx context.Context,
+	cfg Config,
+	cands []liveEndpoint,
+	fromSweep bool,
+	onPhase func(string),
+	pt phaseTimer,
+	handshake func([]liveEndpoint, time.Duration) (string, error),
+	setEndpoint func(string) error,
+) (string, error) {
+	if !fromSweep {
+		connected, err := handshake(cands, 6*time.Second)
+		if err == nil {
+			return connected, nil
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		logx.Infof("[wgtun] cached/seed candidates all failed (%v); running full sweep", err)
+		swept, _, serr := probeCandidatesFn(ctx, cfg, "", true, onPhase)
+		if serr != nil {
+			return "", fmt.Errorf("wgtun: full sweep: %w", serr)
+		}
+		cands = swept
+	}
+
+	// P1: persist the probe-live candidates as neutral cache entries (the next
+	// connect re-probes them cheaply instead of a full sweep).
+	recordProbed(cands)
+
+	// P3: parallel disposable handshake ranking — keep only the candidates that
+	// actually completed a handshake, fastest first.
+	pt.mark("handshake_probe_start")
+	ranked := rankCandidatesByHandshake(ctx, cfg, cands)
+	pt.mark("handshake_probe_done")
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if len(ranked) == 0 {
+		return "", fmt.Errorf("no candidate completed a disposable handshake among %d", len(cands))
+	}
+	// Point the real tunnel at the top-ranked candidate before the serial
+	// re-verify (handshakeAcross's first attempt assumes the endpoint is set).
+	if err := setEndpoint(ranked[0].Addr); err != nil {
+		logx.Warnf("[wgtun] set endpoint %s: %v", ranked[0].Addr, err)
+	}
+	return handshake(ranked, handshakeTimeout)
+}
+
 // handshakeAcross drives the real tunnel's handshake across a ranked candidate
 // list: the first candidate is already being tried (Up started it), and each
 // failure hot-switches the peer to the next via UAPI — a millisecond remove+add,
@@ -793,12 +912,18 @@ func handshakeAcross(t *tunnel, cands []liveEndpoint, timeout time.Duration) (st
 			}
 		}
 		logx.Infof("[wgtun] real-tunnel handshake %d/%d: %s", i+1, len(cands), c.Addr)
+		start := time.Now()
 		err := t.WaitHandshake(timeout)
+		elapsedMs := time.Since(start).Milliseconds()
 		// Learn from EVERY attempt — including the failures. This is what makes
 		// the next connect start from endpoints that historically handshake
 		// instead of re-running the same 8 timeouts in the same order. Failures
 		// are recorded, not evicted: see endpointCache.recordAttempt.
 		cache.recordAttempt(c.Addr, err == nil)
+		// P5.1: the REAL handshake elapsed, on top of the successRate accounting
+		// above. A failed handshake still records LastSeen but not the elapsed
+		// (a timeout is not a latency measurement).
+		cache.recordHandshake(c.Addr, elapsedMs, err == nil)
 		if err != nil {
 			lastErr = err
 			continue
@@ -845,6 +970,18 @@ func (m *Manager) scheduleSpeedSample() {
 			logx.Warnf("[wgtun] speed sample unavailable: %v", err)
 		} else {
 			logx.Infof("[wgtun] speed: %.1f Mbps through %s", mbps, ep)
+			// P5.1: persist the measured throughput. The measurement ran OUTSIDE
+			// m.mu (network I/O must not hold it); re-take m.mu and re-check the
+			// generation + endpoint so the speed is never written against the
+			// wrong endpoint, and so this cache write serializes with failover's
+			// (both under m.mu — no read-modify-write race on endpoints.json).
+			m.mu.Lock()
+			if m.gen == gen && m.current == ep {
+				c := loadCache()
+				c.recordSpeed(ep, mbps)
+				c.save()
+			}
+			m.mu.Unlock()
 		}
 	}()
 }
@@ -954,7 +1091,13 @@ func (m *Manager) Stop() error {
 	// only then do we take it and tear down for real. Start resets the flag.
 	m.stopReq.Store(true)
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	// Detach the SOCKS child under the lock, but close it only AFTER m.mu is
+	// released: TunnelSocks.Close waits on the relay goroutines, and a relay's
+	// TunnelDialer.Alive() calls m.Running() which re-takes m.mu — closing under
+	// the lock would deadlock. Clearing the reference first also means nothing
+	// can resurrect it while the tunnel is being torn down.
+	socks := m.socks
+	m.socks = nil
 	// Stop the health monitor FIRST: otherwise it can start a failover against a
 	// session that is being torn down, re-adding a route Revert just deleted.
 	if m.healthStop != nil {
@@ -983,6 +1126,13 @@ func (m *Manager) Stop() error {
 			errs = append(errs, err)
 		}
 		m.link = nil
+	}
+	m.mu.Unlock()
+
+	if socks != nil {
+		if err := socks.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }

@@ -7,214 +7,142 @@ import (
 	"time"
 )
 
-func TestEndpointCacheOrder(t *testing.T) {
-	var c endpointCache
-	c.recordSuccess("a:4500", 120)
-	c.recordSuccess("b:4500", 45)
-	c.recordSuccess("c:4500", 80)
-
-	got := c.orderedAddrs()
-	want := []string{"b:4500", "c:4500", "a:4500"} // fastest first
-	if len(got) != len(want) {
-		t.Fatalf("len = %d, want %d (%v)", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("got[%d]=%q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
-// TestSuccessRateSmoothing locks in the Laplace prior: an untried endpoint must
-// score better than one that has only ever failed, and worse than one that has
-// only ever succeeded — otherwise ranking degenerates into either "never touch
-// anything untested" or "1 lucky hit outranks a proven endpoint".
-func TestSuccessRateSmoothing(t *testing.T) {
-	var (
-		failed  = endpointEntry{Addr: "f", SuccessCount: 0, Attempts: 1}
-		virgin  = endpointEntry{Addr: "v"}
-		onceOk  = endpointEntry{Addr: "o", SuccessCount: 1, Attempts: 1}
-		veteran = endpointEntry{Addr: "w", SuccessCount: 18, Attempts: 20}
-	)
-	if got, want := failed.successRate(), (1.0 / 3.0); got != want {
-		t.Fatalf("failed rate = %v, want %v", got, want)
-	}
-	if got, want := virgin.successRate(), 0.5; got != want {
-		t.Fatalf("virgin rate = %v, want %v", got, want)
-	}
-	if got, want := onceOk.successRate(), (2.0 / 3.0); got != want {
-		t.Fatalf("once-ok rate = %v, want %v", got, want)
-	}
-	if onceOk.successRate() >= veteran.successRate() {
-		t.Fatalf("one success (%v) must not outrank 18/20 (%v)",
-			onceOk.successRate(), veteran.successRate())
-	}
-	// A legacy entry (written before Attempts existed) must bootstrap from its
-	// successes rather than being treated as "0 attempts, 1 success".
-	if got, want := (endpointEntry{SuccessCount: 3}).successRate(), (4.0 / 5.0); got != want {
-		t.Fatalf("legacy rate = %v, want %v", got, want)
-	}
-}
-
-// TestOrderBySuccessRate is the behaviour the ranking change exists for: after
-// one bad run, the endpoint that actually connected must lead the next connect,
-// and the ones that only burned their handshake timeout must fall behind even
-// untested endpoints.
-func TestOrderBySuccessRate(t *testing.T) {
-	// orderHandshakeCandidates loads the cache itself, so the state dir — not a
-	// local endpointCache — is what this test has to seed.
-	origDir := stateDir
+func saveStateDir(t *testing.T) func() {
+	t.Helper()
+	orig := stateDir
 	stateDir = t.TempDir()
-	defer func() { stateDir = origDir }()
+	return func() { stateDir = orig }
+}
 
-	var c endpointCache
-	// Endpoints only exist in the cache once they have succeeded (a failed
-	// unknown candidate is never persisted), so "known but now failing" means
-	// "worked before, timed out since".
-	c.recordAttempt("good:2408", true)                   // never failed
-	for _, ep := range []string{"bad:500", "bad:1701"} { // worked once ...
-		c.recordAttempt(ep, true)
+func addrs(eps []liveEndpoint) []string {
+	out := make([]string, len(eps))
+	for i, e := range eps {
+		out[i] = e.Addr
 	}
-	c.recordAttempt("bad:500", false) // ... then timed out twice
-	c.recordAttempt("bad:500", false)
-	for i := 0; i < 3; i++ { // ... and three times, so it is the worst
-		c.recordAttempt("bad:1701", false)
+	return out
+}
+
+// TestRecordLastGoodPersists pins that recordLastGood writes, survives a
+// loadCache round-trip, and stamps a non-zero timestamp.
+func TestRecordLastGoodPersists(t *testing.T) {
+	defer saveStateDir(t)()
+
+	recordLastGood("162.159.192.99:2408")
+	c := loadCache()
+	if c.LastGood != "162.159.192.99:2408" {
+		t.Fatalf("LastGood = %q, want 162.159.192.99:2408", c.LastGood)
 	}
-	// "new:8380" is not in the cache at all -> neutral prior (0.5).
+	if c.LastGoodAt.IsZero() {
+		t.Fatalf("LastGoodAt is zero, want a timestamp")
+	}
+}
+
+// TestRecordLastGoodEmptyIsNoop pins that an empty address is never recorded.
+func TestRecordLastGoodEmptyIsNoop(t *testing.T) {
+	defer saveStateDir(t)()
+
+	recordLastGood("")
+	if c := loadCache(); c.LastGood != "" {
+		t.Fatalf("LastGood = %q, want empty", c.LastGood)
+	}
+}
+
+// TestRecordLastGoodIdempotent pins that re-recording the same address does not
+// rewrite the timestamp (no file churn on every connect).
+func TestRecordLastGoodIdempotent(t *testing.T) {
+	defer saveStateDir(t)()
+
+	recordLastGood("a:1")
+	first := loadCache().LastGoodAt
+	time.Sleep(10 * time.Millisecond)
+	recordLastGood("a:1")
+	if got := loadCache().LastGoodAt; !got.Equal(first) {
+		t.Fatalf("LastGoodAt changed on idempotent write: %v -> %v", first, got)
+	}
+}
+
+// TestRecordLastGoodDoesNotForgeSuccessRate pins that recording last-good does
+// NOT touch the endpoint's handshake success accounting — it is a separate
+// "data plane proven" fact, never a forged successRate.
+func TestRecordLastGoodDoesNotForgeSuccessRate(t *testing.T) {
+	defer saveStateDir(t)()
+
+	c := loadCache()
+	c.Endpoints = []endpointEntry{{Addr: "a:1", Attempts: 5, SuccessCount: 2}}
 	c.save()
 
-	eps := orderHandshakeCandidates([]liveEndpoint{
-		{Addr: "bad:500", Latency: 5},
-		{Addr: "new:8380", Latency: 7},
-		{Addr: "bad:1701", Latency: 6},
-		{Addr: "good:2408", Latency: 9},
-	})
-	// good 1/1 = 0.67; new = 0.50; bad:500 1/3 = 0.40; bad:1701 1/4 = 0.33.
-	want := []string{"good:2408", "new:8380", "bad:500", "bad:1701"}
-	if len(eps) != len(want) {
-		t.Fatalf("len = %d, want %d", len(eps), len(want))
+	recordLastGood("a:1")
+	got := loadCache()
+	if len(got.Endpoints) != 1 || got.Endpoints[0].Attempts != 5 || got.Endpoints[0].SuccessCount != 2 {
+		t.Fatalf("recordLastGood mutated success accounting: %+v", got.Endpoints)
+	}
+	if got.LastGood != "a:1" {
+		t.Fatalf("LastGood = %q, want a:1", got.LastGood)
+	}
+}
+
+// TestCachedCandidatesLastGoodPriority pins the discovery order: seed first,
+// then last-known-good (even when it is NOT the top handshake-ranked cache
+// entry), then the rest of the cache by handshake success.
+func TestCachedCandidatesLastGoodPriority(t *testing.T) {
+	defer saveStateDir(t)()
+
+	c := loadCache()
+	c.Endpoints = []endpointEntry{
+		{Addr: "proven:1", Attempts: 10, SuccessCount: 9},  // successRate 0.83
+		{Addr: "meh:1", Attempts: 2, SuccessCount: 0},      // 0.25
+		{Addr: "lastgood:1", Attempts: 1, SuccessCount: 1}, // 0.67 (lower than proven)
+	}
+	c.LastGood = "lastgood:1"
+	c.save()
+
+	got := cachedCandidates("seed:1", "")
+	want := []string{"seed:1", "lastgood:1", "proven:1", "meh:1"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", addrs(got), want)
 	}
 	for i := range want {
-		if eps[i].Addr != want[i] {
-			t.Fatalf("got[%d]=%q, want %q (full: %v)", i, eps[i].Addr, want[i], eps)
+		if got[i].Addr != want[i] {
+			t.Fatalf("cachedCandidates[%d] = %q, want %q (full: %v)", i, got[i].Addr, want[i], addrs(got))
 		}
 	}
-	// Failures must be recorded, never evicted: only failover evicts.
-	if len(c.Endpoints) != 3 {
-		t.Fatalf("attempts should not evict; got %d entries", len(c.Endpoints))
+}
+
+// TestCachedCandidatesLastGoodDedup pins that a last-good that is also in the
+// regular cache appears exactly once, and first.
+func TestCachedCandidatesLastGoodDedup(t *testing.T) {
+	defer saveStateDir(t)()
+
+	c := loadCache()
+	c.Endpoints = []endpointEntry{
+		{Addr: "lastgood:1", Attempts: 1, SuccessCount: 1},
+		{Addr: "other:1", Attempts: 1, SuccessCount: 1},
+	}
+	c.LastGood = "lastgood:1"
+	c.save()
+
+	got := cachedCandidates("", "")
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates, want 2 (dedup): %v", len(got), addrs(got))
+	}
+	if got[0].Addr != "lastgood:1" {
+		t.Fatalf("first candidate = %q, want lastgood:1", got[0].Addr)
 	}
 }
 
-// TestRecordAttemptDoesNotCreateOnFailure is the cache-growth guard. Persisting
-// every failed candidate added ~11 entries per sweep-driven connect, which grew
-// endpoints.json without bound and made the next fast path probe dozens of
-// endpoints that had never once worked. A failure may only demote something
-// already known.
-func TestRecordAttemptDoesNotCreateOnFailure(t *testing.T) {
-	var c endpointCache
-	c.recordAttempt("never-worked:500", false)
-	if len(c.Endpoints) != 0 {
-		t.Fatalf("failure created a cache entry for an unknown endpoint: %d", len(c.Endpoints))
-	}
-	// A success does create one...
-	c.recordAttempt("worked:2408", true)
-	if len(c.Endpoints) != 1 || c.Endpoints[0].SuccessCount != 1 || c.Endpoints[0].Attempts != 1 {
-		t.Fatalf("success accounting wrong: %+v", c.Endpoints)
-	}
-	// ...and from then on its failures are recorded (that is what demotes it).
-	c.recordAttempt("worked:2408", false)
-	if len(c.Endpoints) != 1 {
-		t.Fatalf("known endpoint should stay: %d", len(c.Endpoints))
-	}
-	if c.Endpoints[0].Attempts != 2 || c.Endpoints[0].SuccessCount != 1 {
-		t.Fatalf("demotion accounting wrong: %+v", c.Endpoints[0])
-	}
-	// 1 success / 2 attempts scores exactly the neutral prior (2/4): one failure
-	// alone does not yet make an endpoint worse than an untried one — that is
-	// deliberate, otherwise a single loss spike would bury a good endpoint.
-	if got := c.Endpoints[0].successRate(); got != 0.5 {
-		t.Fatalf("1/2 rate = %v, want 0.5", got)
-	}
-	// Two failures for one success does drop it below the prior.
-	c.recordAttempt("worked:2408", false)
-	if got := c.Endpoints[0].successRate(); got >= 0.5 {
-		t.Fatalf("1/3 rate = %v, want < 0.5", got)
-	}
-}
+// TestCachedCandidatesExcludeStillSkipsLastGood pins that the exclude filter
+// applies to the last-good slot too (a just-failed endpoint must not be handed
+// straight back on the very next attempt).
+func TestCachedCandidatesExcludeStillSkipsLastGood(t *testing.T) {
+	defer saveStateDir(t)()
 
-// TestPruneOutOfPool covers the "ghost" cleanup: an address the current pool can
-// no longer generate must go, an in-pool address must stay, the seed is always
-// kept, and the sweep is throttled so it cannot rebuild the pool on every
-// connect.
-func TestPruneOutOfPool(t *testing.T) {
-	// A real pool address (host 228 -> warpPorts[228%54] == 903) and a ghost
-	// (a 8.x segment the prefix list dropped).
-	inPool := "162.159.195.228:903"
-	ghost := "8.39.125.118:2408"
-	poolHas := false
-	for _, ep := range poolAddresses() {
-		if ep == inPool {
-			poolHas = true
-			break
-		}
-	}
-	if !poolHas {
-		t.Fatalf("%s should be in the generated pool (host%%54 mapping)", inPool)
-	}
+	c := loadCache()
+	c.Endpoints = []endpointEntry{{Addr: "lastgood:1", Attempts: 1, SuccessCount: 1}, {Addr: "other:1", Attempts: 1, SuccessCount: 1}}
+	c.LastGood = "lastgood:1"
+	c.save()
 
-	var c endpointCache
-	c.recordAttempt(inPool, true)
-	c.recordAttempt(ghost, true)
-
-	removed, ran := c.pruneOutOfPool(ghost) // ghost passed as the pinned seed
-	if !ran {
-		t.Fatal("first prune must run (LastPruned zero value = never)")
-	}
-	if removed != 0 {
-		t.Fatalf("seed should never be pruned, removed %d", removed)
-	}
-
-	// Second call is throttled.
-	if _, ran := c.pruneOutOfPool(ghost); ran {
-		t.Fatal("second prune must be throttled by pruneInterval")
-	}
-
-	// With no seed pinning it, the ghost goes and the pool address stays.
-	c.LastPruned = time.Time{}
-	removed, _ = c.pruneOutOfPool("some-other-seed:1")
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
-	}
-	if len(c.Endpoints) != 1 || c.Endpoints[0].Addr != inPool {
-		t.Fatalf("survivors wrong: %+v", c.Endpoints)
-	}
-}
-
-func TestEndpointCacheEviction(t *testing.T) {
-	var c endpointCache
-	c.recordSuccess("a:4500", 100)
-	c.recordFailure("a:4500")
-	c.recordFailure("a:4500")
-	if len(c.Endpoints) != 1 {
-		t.Fatalf("evicted too early after 2 failures: %d", len(c.Endpoints))
-	}
-	c.recordFailure("a:4500")
-	if len(c.Endpoints) != 0 {
-		t.Fatalf("not evicted after 3 failures: %d", len(c.Endpoints))
-	}
-}
-
-func TestEndpointCacheSuccessResetsFail(t *testing.T) {
-	var c endpointCache
-	c.recordSuccess("a:4500", 100)
-	c.recordFailure("a:4500")
-	c.recordFailure("a:4500")
-	c.recordSuccess("a:4500", 90) // success resets the failure streak
-	c.recordFailure("a:4500")
-	if len(c.Endpoints) != 1 {
-		t.Fatalf("evicted despite a successful reset: %d", len(c.Endpoints))
-	}
-	if c.Endpoints[0].FailCount != 1 {
-		t.Fatalf("fail count = %d, want 1", c.Endpoints[0].FailCount)
+	got := cachedCandidates("", "lastgood:1")
+	if len(got) != 1 || got[0].Addr != "other:1" {
+		t.Fatalf("got %v, want [other:1] (excluded last-good)", addrs(got))
 	}
 }

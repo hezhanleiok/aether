@@ -537,6 +537,16 @@ func (m *routeManager) revertDNS() error {
 	logx.Infof("[wgtun] revert: DNS begin (%s)", m.dnsPath)
 	k, err := registry.OpenKey(registry.LOCAL_MACHINE, m.dnsPath, registry.SET_VALUE)
 	if err != nil {
+		// A vanished key is the goal state reached (the adapter's registry key
+		// is removed with the adapter when the tunnel is closed), not a
+		// failure — the same rule recoverFromState already applies.
+		if isNotFound(err) {
+			logx.Infof("[wgtun] revert: DNS key already absent")
+			m.dnsPath = ""
+			m.oldDNS = ""
+			m.haveOldDNS = false
+			return nil
+		}
 		logx.Warnf("[wgtun] revert: DNS open key failed: %v", err)
 		return fmt.Errorf("open DNS key: %w", err)
 	}
@@ -652,6 +662,14 @@ func (m *routeManager) setInterfaceMetric(metric uint32) error {
 // restoreInterfaceMetric puts back the per-family metric and UseAutomaticMetric
 // read in setInterfaceMetric, so the adapter does not stay pinned at a low
 // metric after the tunnel is gone.
+//
+// A vanished interface (its metric row already gone) is the goal state reached,
+// not a failure: on the data-plane-dead path the tunnel is closed BEFORE Revert
+// runs, so closing the adapter can remove the metric row and the restore then
+// lands on nothing. recoverFromState and restoreLinkMetrics already treat
+// "already absent" as success; this must too, or Revert reports a partial
+// failure for a state that is already correct and then skips clearState(),
+// leaving a crash-recovery file behind for the next connect to clean up.
 func (m *routeManager) restoreInterfaceMetric() error {
 	var errs []error
 	for i, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
@@ -669,6 +687,15 @@ func (m *routeManager) restoreInterfaceMetric() error {
 		set.UseAutomaticMetric = st.auto
 		set.Metric = st.metric
 		if err := revertSetMetric(&set); err != nil {
+			if isNotFound(err) {
+				// The interface (and its metric row) is already gone — closing
+				// the tunnel removed it, so there is nothing left to restore.
+				// Clear the stash so a later Revert does not retry a row that
+				// can never come back.
+				logx.Infof("[wgtun] revert: metric family %d already absent", family)
+				m.ifMetric[i] = ifMetricState{}
+				continue
+			}
 			logx.Warnf("[wgtun] revert: metric restore failed family=%d: %v", family, err)
 			errs = append(errs, fmt.Errorf("restore metric family %d: %w", family, err))
 			continue // keep the stash so a later Revert retries this family

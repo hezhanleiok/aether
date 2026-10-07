@@ -298,7 +298,14 @@ const maxHandshakeCandidates = 12
 func cachedCandidates(seed, exclude string) []liveEndpoint {
 	seen := make(map[string]bool)
 	var out []liveEndpoint
-	for _, ep := range append([]string{seed}, loadCache().orderedAddrs()...) {
+	// Priority: the operator's pinned seed, then the last-known-good endpoint
+	// (the one that just carried a full verified session — handshake AND
+	// data-plane), then the remaining cached endpoints by historical handshake
+	// success. LastGood leads because it is the ONLY candidate whose data plane
+	// is known to have worked recently; the rest are handshake-ranked only.
+	c := loadCache()
+	ordered := append([]string{seed, c.LastGood}, c.orderedAddrs()...)
+	for _, ep := range ordered {
 		if ep == "" || seen[ep] || (exclude != "" && ep == exclude) {
 			continue
 		}
@@ -349,8 +356,12 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 			// No onPhase labels here: the pre-screen is sub-second and the
 			// UI's "scan n/total" wording is the full-sweep's progress. Silence
 			// keeps a healthy reconnect looking exactly like it used to.
-			live := filterLiveStrict(ctx, addrs, fastPathProbeWorkers, nil)
-			if len(live) == 0 && ctx.Err() == nil {
+			live := filterLiveStrictFn(ctx, addrs, fastPathProbeWorkers, nil)
+			// P5.3: the 2s retry only earns its keep when the Healthy Pool is non-empty
+			// (a verified endpoint going quiet is plausibly one loss spike). When the
+			// pool holds only Fresh/Suspect entries, a dead liveness is more likely a
+			// genuinely dead endpoint — skip the retry and go straight to discovery.
+			if len(live) == 0 && ctx.Err() == nil && !loadCache().needsDiscovery() {
 				// Everything dead at once is far more likely one loss spike than
 				// eight simultaneous deaths, and the probe rejects on a single
 				// lost round. Pay 2s and re-ask before paying ~57s for a sweep.
@@ -359,7 +370,7 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 				case <-ctx.Done():
 					return nil, false, ctx.Err()
 				}
-				live = filterLiveStrict(ctx, addrs, fastPathProbeWorkers, nil)
+				live = filterLiveStrictFn(ctx, addrs, fastPathProbeWorkers, nil)
 				if len(live) > 0 {
 					logx.Infof("[wgtun] fast path: retry after %v recovered %d/%d cached/seed endpoints",
 						fastPathRetryDelay, len(live), len(quick))
@@ -367,7 +378,11 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 			}
 			if len(live) > 0 {
 				logx.Infof("[wgtun] fast path: %d/%d cached/seed endpoints answered the liveness probe", len(live), len(quick))
-				return orderHandshakeCandidates(live), false, nil
+				// P4.2: LastGood is the absolute-first real handshake candidate on the
+				// warm path. orderHandshakeCandidates ranks by historical successRate,
+				// which would otherwise let a longer-track-record endpoint handshake
+				// ahead of the one that most recently carried a full verified session.
+				return lastGoodFirst(orderHandshakeCandidates(live)), false, nil
 			}
 			logx.Infof("[wgtun] fast path: none of the %d cached/seed endpoints answered; falling through to the full sweep", len(quick))
 		}
@@ -376,7 +391,7 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 	if exclude != "" {
 		candidates = excludeEndpoint(candidates, exclude)
 	}
-	live := filterLiveStrict(ctx, candidates, udpProbeWorkers, onPhase)
+	live := filterLiveStrictFn(ctx, candidates, udpProbeWorkers, onPhase)
 	if len(live) == 0 {
 		return nil, true, fmt.Errorf("no endpoint answered the liveness probe (checked %d candidates)", len(candidates))
 	}
@@ -389,6 +404,15 @@ func probeCandidates(ctx context.Context, cfg Config, exclude string, useSweep b
 	}
 	return live, true, nil
 }
+
+// probeCandidatesFn is the injectable seam for endpoint discovery (overridden in
+// tests so the full sweep can be faked without hitting the network).
+var probeCandidatesFn = probeCandidates
+
+// filterLiveStrictFn is the injectable seam for the liveness pre-screen
+// (overridden in tests so the P5.3 sweep-trigger logic — "Healthy Pool empty →
+// skip the 2s fast-path retry" — can be exercised offline without UDP).
+var filterLiveStrictFn = filterLiveStrict
 
 // orderHandshakeCandidates ranks candidate endpoints for the real-tunnel
 // handshake. The UDP liveness probe says an endpoint ANSWERS; it says nothing
@@ -408,10 +432,14 @@ func orderHandshakeCandidates(eps []liveEndpoint) []liveEndpoint {
 	for _, e := range cache.Endpoints {
 		hist[e.Addr] = e
 	}
+	// P5.2: the Healthy Pool sorts by adaptive quality (stability + freshness +
+	// validation + reliability + latency + speed), not by successRate alone. The
+	// liveness probe's own speed/latency remain tie-breaks below the quality key.
+	now := time.Now()
 	sort.Slice(eps, func(i, j int) bool {
 		hi, hj := hist[eps[i].Addr], hist[eps[j].Addr]
-		if ri, rj := hi.successRate(), hj.successRate(); ri != rj {
-			return ri > rj
+		if si, sj := hi.qualityScore(now), hj.qualityScore(now); si != sj {
+			return si > sj
 		}
 		if eps[i].Speed != eps[j].Speed {
 			return eps[i].Speed > eps[j].Speed
@@ -424,6 +452,39 @@ func orderHandshakeCandidates(eps []liveEndpoint) []liveEndpoint {
 		}
 		return eps[i].Addr < eps[j].Addr
 	})
+	return eps
+}
+
+// lastGoodFirst moves the persisted last-known-good endpoint to the FRONT of a
+// ranked candidate list, so the real tunnel handshakes it FIRST regardless of
+// its historical successRate. This is P4.2: before, LastGood only led the
+// liveness pre-screen (cachedCandidates) and then lost that lead to
+// orderHandshakeCandidates' successRate sort — an endpoint with a longer good
+// track record could handshake ahead of the one that most recently carried a
+// full verified session.
+//
+// It is a pure reorder, not a promotion of an unverified address: the endpoint
+// must already be in the list (it survived liveness), and everything else keeps
+// its relative order. If LastGood is absent (excluded, dead on liveness, or not
+// yet cached) or already first, the list is returned unchanged.
+func lastGoodFirst(eps []liveEndpoint) []liveEndpoint {
+	lg := loadCache().LastGood
+	if lg == "" || len(eps) < 2 {
+		return eps
+	}
+	for i, e := range eps {
+		if e.Addr != lg {
+			continue
+		}
+		if i == 0 {
+			return eps // already first
+		}
+		out := make([]liveEndpoint, 0, len(eps))
+		out = append(out, e)
+		out = append(out, eps[:i]...)
+		out = append(out, eps[i+1:]...)
+		return out
+	}
 	return eps
 }
 

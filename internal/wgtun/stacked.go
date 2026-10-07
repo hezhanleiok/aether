@@ -90,6 +90,9 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 	}()
 
 	s := &StackedTunnel{link: link}
+	// Monotonic two-layer connect-stage clock; outer_*/inner_* prefixes separate
+	// the two tunnels' stages so the WG-over-WG data path is observable end to end.
+	pt := newPhaseTimer("stacked")
 
 	// ---- outer layer: one real adapter, endpoint hot-switched across candidates ----
 	// Same architecture as Manager.Start (see the note there): the candidate
@@ -112,12 +115,15 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 	// fromSweep is unused here: both branches of the stacked outer handshake use
 	// the full deadline (handshakeTimeout), so unlike Manager.Start there is no
 	// short-vs-full deadline choice to make from it.
+	pt.mark("endpoint_discovery_start")
 	cands, _, err := probeCandidates(ctx, outerCfg, innerCfg.Endpoint, false, phase)
 	if err != nil {
 		return nil, fmt.Errorf("wgtun: outer candidates: %w", err)
 	}
+	pt.mark("endpoint_discovery_done")
 	outerCfg.Endpoint = cands[0].Addr
 
+	pt.mark("outer_tunnel_start")
 	outer, err := New(outerCfg)
 	if err != nil {
 		return nil, fmt.Errorf("wgtun: outer tunnel: %w", err)
@@ -134,6 +140,7 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 	// tunnel black-holes the inner handshake. If every cached/seed candidate
 	// fails, widen to the full-pool UDP sweep (known-live only) and retry those
 	// on the same adapter.
+	pt.mark("outer_handshake_start")
 	connectedOuter, err := handshakeAcross(outer, cands, handshakeTimeout)
 	if err != nil && ctx.Err() == nil {
 		logx.Infof("[wgtun] stacked: cached/seed outer candidates all failed (%v); running full sweep", err)
@@ -146,6 +153,7 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 		_ = outer.Down()
 		return nil, fmt.Errorf("wgtun: outer handshake: %w", err)
 	}
+	pt.mark("outer_handshake_done")
 	outerCfg.Endpoint = connectedOuter
 	s.outerEndpoint = connectedOuter
 
@@ -154,10 +162,12 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 		_ = outer.Down()
 		return nil, fmt.Errorf("wgtun: outer endpoint route: %w", err)
 	}
+	pt.mark("outer_route_done")
 	logOuterMetric(outer.luid())
 	s.outerRoutes = outerRM
 
 	// ---- inner layer: endpoint routed through the outer adapter ----
+	pt.mark("inner_tunnel_start")
 	inner, err := New(innerCfg)
 	if err != nil {
 		s.teardownOuter()
@@ -212,6 +222,7 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 		return nil, fmt.Errorf("wgtun: inner endpoint route: %w", err)
 	}
 	s.innerEpRow = innerEpRow
+	pt.mark("inner_route_done")
 
 	// Persist the stacked marker + inner endpoint route for crash recovery.
 	ifIndex, _ := convertInterfaceLuidToIndex(outer.luid())
@@ -236,26 +247,32 @@ func NewStackedTunnel(ctx context.Context, outerCfg, innerCfg Config, onPhase fu
 	}
 
 	phase("inner-handshake")
+	pt.mark("inner_handshake_start")
 	if err := inner.WaitHandshake(stackedHandshakeTimeout); err != nil {
 		s.teardownInner()
 		s.teardownOuter()
 		return nil, fmt.Errorf("wgtun: inner handshake: %w", err)
 	}
+	pt.mark("inner_handshake_done")
 	phase("route-flip")
 	if err := innerRM.ApplyDefaultRoutes(); err != nil {
 		s.teardownInner()
 		s.teardownOuter()
 		return nil, err
 	}
+	pt.mark("route_done")
+	pt.mark("dns_start")
 	if err := innerRM.ApplyDNS(); err != nil {
 		s.teardownInner()
 		s.teardownOuter()
 		return nil, err
 	}
+	pt.mark("dns_done")
 
 	phase("up")
 	logx.Infof("[wgtun] stacked up: outer=%s inner=%s (inner endpoint via outer ifIndex %d)",
 		outerCfg.Endpoint, innerCfg.Endpoint, ifIndex)
+	pt.mark("native_connected")
 	return s, nil
 }
 
