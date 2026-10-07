@@ -138,9 +138,8 @@ func readFlatToml(path string) (map[string]string, error) {
 
 func fatal(format string, err error) {
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "aetherwg: "+format+"\n", err)
-	} else {
-		fmt.Fprintf(os.Stderr, "aetherwg: "+format+"\n")
+		format = fmt.Sprintf(format, err)
 	}
+	fmt.Fprintf(os.Stderr, "aetherwg: %s\n", format)
 	os.Exit(1)
 }
