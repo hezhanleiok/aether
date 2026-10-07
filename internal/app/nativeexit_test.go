@@ -16,9 +16,11 @@ import (
 //	Psiphon: useNativeWG == true,  NativeExitOnly == "psiphon"
 //	Tor:     useNativeWG == true,  NativeExitOnly == "tor"
 //
-// Note the second row deliberately ALSO sets NativeWireGuard=true: a user who
-// enabled the native toggle must still not send the DEFAULT exit through the
-// native transport — that conflation is exactly the bug this matrix guards.
+// Note the second row deliberately ALSO sets NativeWireGuard=true: useNativeWG
+// is the EXIT gate (Psiphon/Tor only) and must stay false for the default exit
+// regardless of the native toggle. The default exit's OPT-IN native dispatch is
+// a separate decision (defaultExitNative in Connect) and is covered by
+// TestDefaultExitNative below, not by this matrix.
 func TestExitSelectionMatrix(t *testing.T) {
 	a := newNativeApp()
 	cases := []struct {
@@ -45,6 +47,29 @@ func TestExitSelectionMatrix(t *testing.T) {
 		}
 		if got := vpn.NativeExitOnly(s); got != c.wantExit {
 			t.Errorf("%s: NativeExitOnly = %q, want %q", c.name, got, c.wantExit)
+		}
+	}
+}
+
+// TestDefaultExitNative pins the default-exit OPT-IN native dispatch: stacked
+// beats the single toggle, the single toggle beats the core, and with neither
+// set the default exit stays on the core path.
+func TestDefaultExitNative(t *testing.T) {
+	cases := []struct {
+		name    string
+		native  bool
+		stacked bool
+		want    string
+	}{
+		{"core by default", false, false, ""},
+		{"native toggle", true, false, "wg"},
+		{"stacked wins over native toggle", true, true, "stacked"},
+		{"stacked alone", false, true, "stacked"},
+	}
+	for _, c := range cases {
+		s := config.Settings{NativeWireGuard: c.native, StackedWireGuard: c.stacked}
+		if got := defaultExitNative(s); got != c.want {
+			t.Errorf("%s: defaultExitNative = %q, want %q", c.name, got, c.want)
 		}
 	}
 }

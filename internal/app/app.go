@@ -431,6 +431,21 @@ func (a *App) GatewayUnhealthy() {
 	a.Reconnect()
 }
 
+// defaultExitNative reports which native transport (if any) the DEFAULT exit
+// should use: "stacked" for warp-in-warp, "wg" for single native WG/AWG, or ""
+// for the original core path. It is pure so the dispatch is unit-testable, and
+// it deliberately ignores the exit chain — Psiphon/Tor exits are handled by
+// useNativeWG/connectNativeExit before this is consulted.
+func defaultExitNative(s config.Settings) string {
+	if s.StackedWireGuard {
+		return "stacked"
+	}
+	if s.NativeWireGuard {
+		return "wg"
+	}
+	return ""
+}
+
 // Connect starts the VPN honoring the current settings and mode.
 func (a *App) Connect() error {
 	// Reject re-entrancy immediately (no blocking): a second Connect while one
@@ -461,25 +476,31 @@ func (a *App) Connect() error {
 		cancel()
 	}()
 
-	// EXIT DISPATCH. The exit choice — not the protocol toggle — decides
-	// whether the native transport is involved at all:
-	//
-	//	exit=default  -> the original core path, untouched (no native AWG/WG,
-	//	                 no Psiphon, no Tor, no only mode)
-	//	exit=psiphon  -> native AWG/WG transport + core Psiphon in only mode
-	//	exit=tor      -> native AWG/WG transport + core Tor in only mode
-	//
-	// The native backend is NOT a shared underlay for every exit: it exists
-	// here only to carry the Psiphon/Tor backend's own traffic. Routing the
-	// default exit through it (which is what `useNativeWG` alone used to do,
-	// since it only looks at Mode) is explicitly wrong.
+	// EXIT DISPATCH. Psiphon/Tor exits are always native (the backend rides the
+	// native tunnel). The DEFAULT exit is core-driven by default and only goes
+	// native when the user opts in via one of the two native switches — see
+	// defaultExitNative below.
 	if a.useNativeWG(s) {
 		exit := vpn.NativeExitOnly(s)
 		logx.Infof("[app] exit=%s (native transport + core %s only)", exit, exit)
 		return a.connectNativeExit(ctx, s)
 	}
-	// Default exit: no native transport, no Psiphon, no Tor, no only mode —
-	// the original core-driven path, untouched.
+
+	// Default exit. Native is OPT-IN here: stacked -> native WG-over-WG, the
+	// native toggle -> native single WG/AWG, otherwise the original core path
+	// is untouched. A native failure is NOT downgraded to the core — it fails
+	// loud (connectNative* return their error), so a broken native stacked
+	// session can never silently become a core gool session.
+	switch defaultExitNative(s) {
+	case "stacked":
+		logx.Infof("[app] exit=default (native stacked WG-over-WG)")
+		return a.connectNativeStacked(ctx, s)
+	case "wg":
+		logx.Infof("[app] exit=default (native WireGuard)")
+		return a.connectNativeWG(ctx, s)
+	}
+	// Default exit, core path: no native transport, no Psiphon, no Tor, no
+	// only mode — the original core-driven path, untouched.
 	logx.Infof("[app] exit=default (core path)")
 
 	if err := a.VPN.Connect(s); err != nil {

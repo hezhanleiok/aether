@@ -246,6 +246,33 @@ func (a *App) connectNativeExit(ctx context.Context, s config.Settings) error {
 	}
 	logx.Infof("[app] native %s up (exit=%s session #%d)", transport, backend, gen)
 
+	// 2.5 Tunnel SOCKS + Psiphon overlay: point Psiphon's upstream at the
+	// tunnel-bound SOCKS (socks5://127.0.0.1:<port>) so its TCP tunnels dial
+	// through the tunnel explicitly instead of trusting the system route. The
+	// SOCKS server is a child of the Manager and is closed by tunnel teardown
+	// (disconnectNativeWG -> Manager.Stop), so a failure below needs no extra
+	// close. The stacked transport exposes no Manager, so it keeps the
+	// route-based only mode.
+	var psiphonOverlay string
+	if backend == "psiphon" {
+		a.connMu.Lock()
+		wg := a.nativeWG
+		a.connMu.Unlock()
+		if wg != nil {
+			_, port, err := wg.StartTunnelSocks()
+			if err != nil {
+				a.rollbackNativeExit(gen, s, fmt.Sprintf("隧道 SOCKS 启动失败：%v", err))
+				return err
+			}
+			psiphonOverlay, err = vpn.WritePsiphonOverlay(port)
+			if err != nil {
+				a.rollbackNativeExit(gen, s, fmt.Sprintf("Psiphon overlay 生成失败：%v", err))
+				return err
+			}
+			logx.Infof("[app] exit=psiphon: tunnel SOCKS on 127.0.0.1:%d, overlay %s", port, psiphonOverlay)
+		}
+	}
+
 	// 3. Only start the core while the session is still wanted: starting it
 	//    and then aborting is what left Psiphon bootstrapping on its own
 	//    (through WLAN, with the tunnel already gone).
@@ -260,6 +287,12 @@ func (a *App) connectNativeExit(ctx context.Context, s config.Settings) error {
 	a.VPN.SetConnectGate(func() bool { return a.nativeExitValid(gen) })
 	es := s
 	es.ExitChain = vpn.OnlyChainFor(s)
+	if psiphonOverlay != "" {
+		// Hand the overlay to the core as AETHER_PSIPHON_CONFIG. Copy the slice
+		// first: es shares s's CoreExtraArgs backing array, and an in-place
+		// append could mutate the user's stored settings.
+		es.CoreExtraArgs = append(append([]string(nil), es.CoreExtraArgs...), "AETHER_PSIPHON_CONFIG="+psiphonOverlay)
+	}
 	if err := a.VPN.Connect(es); err != nil {
 		err = fmt.Errorf("出口后端 %s 启动失败：%w", backend, err)
 		a.rollbackNativeExit(gen, s, err.Error())
