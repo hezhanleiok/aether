@@ -865,14 +865,41 @@ func handshakeCandidates(
 	setEndpoint func(string) error,
 ) (string, error) {
 	if !fromSweep {
-		connected, err := handshake(cands, 6*time.Second)
-		if err == nil {
-			return connected, nil
+		// Warm path: pre-screen the cached/seed candidates with a PARALLEL
+		// disposable handshake BEFORE the real tunnel spends a handshake on
+		// them. Trying N stale entries serially costs N x 6s of timeouts —
+		// observed 2026-10-08: 9 x 6s = 54s of nothing on a network where most
+		// cached entries had gone stale — while the disposable probe answers the
+		// same question in one concurrent round (handshakeProbeWorkers wide).
+		pt.mark("handshake_probe_start")
+		ranked := rankCandidatesByHandshake(ctx, cfg, cands)
+		pt.mark("handshake_probe_done")
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
-		if ctx.Err() != nil {
-			return "", ctx.Err()
+		// Re-verify the survivors on the real tunnel with the SHORT deadline: a
+		// stale cache entry must still fail fast and hand over to the sweep.
+		if len(ranked) > 0 {
+			// handshakeAcross's first attempt assumes the peer is already the
+			// candidate, so switch only when the ranking moved off the endpoint
+			// the device is currently pointed at (cands[0]) — a no-op switch
+			// would be a redundant UAPI remove+add.
+			if ranked[0].Addr != cands[0].Addr {
+				if err := setEndpoint(ranked[0].Addr); err != nil {
+					logx.Warnf("[wgtun] set endpoint %s: %v", ranked[0].Addr, err)
+				}
+			}
+			connected, err := handshake(ranked, 6*time.Second)
+			if err == nil {
+				return connected, nil
+			}
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			logx.Infof("[wgtun] cached/seed candidates all failed (%v); running full sweep", err)
+		} else {
+			logx.Infof("[wgtun] no cached/seed candidate completed a disposable handshake; running full sweep")
 		}
-		logx.Infof("[wgtun] cached/seed candidates all failed (%v); running full sweep", err)
 		swept, _, serr := probeCandidatesFn(ctx, cfg, "", true, onPhase)
 		if serr != nil {
 			return "", fmt.Errorf("wgtun: full sweep: %w", serr)
