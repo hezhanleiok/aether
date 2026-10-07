@@ -321,7 +321,7 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	// right before "how long until this flow is blocked" is measured is exactly
 	// the kind of traffic that can trip a volume-based DPI, i.e. a confound.
 	if ConnectSpeedSample {
-		m.scheduleSpeedSample()
+		m.scheduleSpeedSample(connected)
 	}
 
 	keep = true
@@ -988,9 +988,15 @@ const speedSampleDuration = 10 * time.Second
 // scheduleSpeedSample launches the delayed, generation-guarded speed sample
 // for the session being started. Callers hold m.mu; the goroutine re-takes it
 // after the delay.
-func (m *Manager) scheduleSpeedSample() {
+//
+// ep is passed in explicitly rather than read from m.current: Start schedules
+// this before m.current is assigned the new session's endpoint, so reading it
+// here captured the PREVIOUS session's endpoint. The m.current == ep guard then
+// never held and every steady-state sample was measured and logged but silently
+// dropped instead of persisted (observed 2026-10-08: a 69.4 Mbps sample was
+// logged, yet endpoints.json kept no throughput for that endpoint).
+func (m *Manager) scheduleSpeedSample(ep string) {
 	gen := m.gen
-	ep := m.current
 	go func() {
 		time.Sleep(speedSampleDelay)
 		// Generation guard: if the session this sample was scheduled for is
@@ -1101,6 +1107,14 @@ const (
 	// the best so far by this factor to be adopted. Below it, the connect stops
 	// measuring rather than chase a marginal gain within sample noise.
 	throughputRelativeGain = 1.30
+	// throughputIterReserve is the worst-case cost of ONE more candidate
+	// iteration: a handshake that times out costs throughputHandshakeTimeout and
+	// is skipped without measuring, one that succeeds costs <1s plus the 2s
+	// sample — so an iteration is always <= throughputHandshakeTimeout. The
+	// budget check reserves it so a candidate is never STARTED when finishing it
+	// would run past the budget. Without the reserve the last iteration always
+	// overshot (observed 2026-10-08: 8s budget, ~10s actually spent).
+	throughputIterReserve = 3 * time.Second
 )
 
 // measureTunnelSpeedParallel samples the live tunnel's download throughput with
@@ -1244,7 +1258,10 @@ func progressiveThroughput(ctx context.Context, t *tunnel, rm *routeManager, can
 		if c.Addr == current {
 			continue
 		}
-		if ctx.Err() != nil || time.Since(start) >= throughputTotalBudget {
+		// Budget check reserves one iteration: the question is whether starting
+		// this candidate can still FINISH within throughputTotalBudget, not
+		// whether we have already spent the budget.
+		if ctx.Err() != nil || time.Since(start)+throughputIterReserve > throughputTotalBudget {
 			break
 		}
 		if err := rm.addEndpointRouteFor(c.Addr); err != nil {
