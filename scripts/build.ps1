@@ -25,7 +25,7 @@ Get-ChildItem (Join-Path $root "bin") -Filter "*.exe~" -ErrorAction SilentlyCont
 Write-Host "==> building Xiaohe.exe..."
 $built = $false
 for ($i = 1; $i -le 3 -and -not $built; $i++) {
-    go build -ldflags "-H windowsgui -s -w" -o $out .\cmd\aethergui
+    go build -tags wgtun -ldflags "-H windowsgui -s -w" -o $out .\cmd\aethergui
     if ($LASTEXITCODE -eq 0 -and (Test-Path $out)) {
         $built = $true
         break
