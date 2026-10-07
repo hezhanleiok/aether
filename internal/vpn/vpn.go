@@ -5,6 +5,7 @@
 package vpn
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -928,6 +929,78 @@ func ChainSocksPort(s config.Settings) int {
 // identity file) so it can also clean it up - see resetStalePsiphonState.
 func PsiphonDir() string { return filepath.Join(config.Dir(), "psiphon") }
 
+// psiphonOverlayName is the temp overlay written by WritePsiphonOverlay. It
+// lives in PsiphonDir() next to the datastore (which AETHER_PSIPHON_DIR also
+// points at), so both the datastore and the overlay are cleaned together.
+const psiphonOverlayName = "psiphon-overlay.json"
+
+// tcpOnlyPsiphonProtocols is the LimitTunnelProtocols list the overlay pins.
+// It keeps every protocol that honours UpstreamProxyURL and drops the QUIC ones:
+// UpstreamProxyURL is NOT applied to Psiphon's UDPDial (psiphon/net.go:137), and
+// the QUIC transports (QUIC-OSSH and the two FRONTED-MEEK-QUIC variants) dial
+// over UDP, so they would bypass the tunnel and must not be offered.
+//
+// SHADOWSOCKS-OSSH stays: despite the name it is a TCP transport —
+// psiphon/common/protocol/protocol.go's TunnelProtocolUsesTCP returns true for
+// it and TunnelProtocolSupportsUpstreamProxy includes it, so UpstreamProxyURL
+// applies. The list below is exactly the bundled core 2.1.0 protocol set (14)
+// minus the 3 QUIC entries.
+var tcpOnlyPsiphonProtocols = []string{
+	"SSH",
+	"OSSH",
+	"TLS-OSSH",
+	"SHADOWSOCKS-OSSH",
+	"UNFRONTED-MEEK-OSSH",
+	"UNFRONTED-MEEK-HTTPS-OSSH",
+	"UNFRONTED-MEEK-SESSION-TICKET-OSSH",
+	"FRONTED-MEEK-OSSH",
+	"FRONTED-MEEK-CDN-OSSH",
+	"FRONTED-MEEK-HTTP-OSSH",
+	"FRONTED-MEEK-CDN-HTTP-OSSH",
+}
+
+// WritePsiphonOverlay writes a minimal psiphon config overlay that pins
+// Psiphon's upstream to the tunnel-bound SOCKS server (socks5://127.0.0.1:<port>)
+// and converges LimitTunnelProtocols to TCP-only. The core lays this overlay
+// over its built-in config (--psiphon-config / AETHER_PSIPHON_CONFIG), so every
+// TCP tunnel dials through our SOCKS while every built-in field survives. It
+// returns the absolute path to hand the core as AETHER_PSIPHON_CONFIG.
+func WritePsiphonOverlay(socksPort int) (string, error) {
+	if socksPort <= 0 || socksPort > 65535 {
+		return "", fmt.Errorf("invalid tunnel SOCKS port: %d", socksPort)
+	}
+	overlay := struct {
+		UpstreamProxyURL     string   `json:"UpstreamProxyURL"`
+		LimitTunnelProtocols []string `json:"LimitTunnelProtocols"`
+	}{
+		UpstreamProxyURL:     fmt.Sprintf("socks5://127.0.0.1:%d", socksPort),
+		LimitTunnelProtocols: tcpOnlyPsiphonProtocols,
+	}
+	b, err := json.Marshal(overlay)
+	if err != nil {
+		return "", err
+	}
+	dir := PsiphonDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, psiphonOverlayName)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// RemovePsiphonOverlay removes the overlay written by WritePsiphonOverlay. It is
+// idempotent and safe to call even when this session never wrote one: the
+// overlay is a per-session temp artifact, so Disconnect clears it regardless.
+func RemovePsiphonOverlay() {
+	path := filepath.Join(PsiphonDir(), psiphonOverlayName)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		logx.Warnf("[vpn] removing psiphon overlay: %v", err)
+	}
+}
+
 // resetPsiphonState clears only the lock files of the Psiphon datastore.
 //
 // The datastore itself (downloaded server list, tactics) must SURVIVE: with a
@@ -1032,6 +1105,10 @@ func (m *Manager) Disconnect() {
 	if err := m.core.Stop(); err != nil {
 		logx.Warnf("[vpn] core stop: %v", err)
 	}
+	// The psiphon overlay is a per-session temp artifact; clear it on every
+	// teardown (idempotent) so a failed or killed session never leaves a stale
+	// UpstreamProxyURL pointing at a dead tunnel SOCKS.
+	RemovePsiphonOverlay()
 	// The core does not always reap Psiphon when it is torn down (a protocol
 	// switch stops and restarts the core). An orphan holds the datastore lock
 	// and the backend ports, which used to fail every later chained connect -
