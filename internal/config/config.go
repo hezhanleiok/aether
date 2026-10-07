@@ -117,6 +117,11 @@ type Settings struct {
 	// packet. It is the half of AmneziaWG that upstream reports as the one
 	// that actually matters (DPI judges a flow by how it opens), so the AWG
 	// entry in the switcher turns it on together with the junk. "" = none.
+	//
+	// This is purely an I1 PACKET setting — it is NOT a transport selector.
+	// "" and "none" both mean "send no fake first packet"; neither one selects
+	// plain WireGuard. The transport a Psiphon/Tor exit rides is chosen by
+	// ExitNativeTransport instead.
 	AWGI1 string `json:"awg_i1"`
 	// AWGI1SNI is the hostname the quic/sip profiles mention. Empty = a
 	// well-known host nobody blocks.
@@ -187,6 +192,18 @@ type Settings struct {
 	// Aether, and leaving the mode stops and reaps Psiphon again.
 	ExitChain  string `json:"exit_chain"`  // "" | psiphon
 	ExitRegion string `json:"exit_region"` // "" = automatic; else ISO-3166-1 alpha-2, e.g. JP
+	// ExitNativeTransport pins the native transport a Psiphon/Tor exit rides:
+	// "" (auto) | "awg" | "wg". Auto means AmneziaWG, because plain WireGuard
+	// is measurably easier to block on this network — that default is
+	// deliberate and is preserved here.
+	//
+	// It is a SEPARATE field from AWGJunk/AWGI1 on purpose: those are the
+	// AmneziaWG obfuscation PARAMETERS (junk decoys and the fake first packet),
+	// not a transport choice. The transport used to be inferred from
+	// AWGI1 == "none" (added in f4cb020), which conflated the I1 packet layer
+	// with the transport layer and left the UI no way to express the intent —
+	// selecting WireGuard in the switcher could never reach the Psiphon exit.
+	ExitNativeTransport string `json:"exit_native_transport"`
 	// ExitLoc is the core's exit-country policy (AETHER_EXIT_LOC): "!" prefix
 	// denies (e.g. "!CN" = refuse tunnels exiting to mainland China and
 	// re-select), a bare list allows only those (e.g. "US,JP"). Empty =

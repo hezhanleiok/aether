@@ -74,28 +74,32 @@ func TestDefaultExitNative(t *testing.T) {
 	}
 }
 
-// TestNativeTransportChoice pins the AWG-first rule: the native exit defaults
-// to the AmneziaWG obfuscation (plain WireGuard is measurably easier to
-// block), and plain WG is chosen ONLY when the user explicitly turned the
-// obfuscation off. Unset defaults must not be read as "user wants plain WG".
+// TestNativeTransportChoice pins the AWG-first rule for a native exit: auto
+// ("" and unrecognised values) keeps the AmneziaWG obfuscation because plain
+// WireGuard is measurably easier to block, while an explicit "wg" is honoured.
+//
+// The choice is read from ExitNativeTransport — a dedicated transport
+// preference — and deliberately NOT from AWGJunk/AWGI1. Those are the
+// obfuscation PARAMETERS; reusing AWGI1 == "none" as a transport signal
+// (f4cb020) conflated the I1 packet layer with the transport layer and left the
+// UI no way to ask for plain WireGuard on a Psiphon/Tor exit.
 func TestNativeTransportChoice(t *testing.T) {
 	a := newNativeApp()
 	cases := []struct {
 		name string
-		junk bool
-		i1   string
+		tsp  string
 		want string
 	}{
-		{"defaults -> AWG", false, "", "awg"},
-		{"junk on -> AWG", true, "", "awg"},
-		{"I1 profile -> AWG", false, "quic", "awg"},
-		{"explicit off -> WG", false, "none", "wg"},
-		{"explicit off (case) -> WG", false, "NONE", "wg"},
+		{"auto/unset -> AWG", "", "awg"},
+		{"explicit awg -> AWG", "awg", "awg"},
+		{"explicit wg -> WG", "wg", "wg"},
+		{"case insensitive -> WG", "WG", "wg"},
+		{"padded -> WG", " wg ", "wg"},
+		{"unrecognised -> AWG (auto)", "bogus", "awg"},
 	}
 	for _, c := range cases {
 		s := a.Settings
-		s.AWGJunk = c.junk
-		s.AWGI1 = c.i1
+		s.ExitNativeTransport = c.tsp
 		if got := a.nativeTransportChoice(s); got != c.want {
 			t.Errorf("%s: transport = %q, want %q", c.name, got, c.want)
 		}

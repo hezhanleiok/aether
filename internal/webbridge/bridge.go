@@ -419,6 +419,23 @@ func applyProtocol(s config.Settings, p Protocol) config.Settings {
 		// afterwards meaningless.
 		s.AWGI1 = ""
 	}
+	// Native EXIT transport: the tunnel a Psiphon/Tor chain rides on. The exit
+	// holds its own preference — nativeTransportChoice reads
+	// ExitNativeTransport, NOT AWGI1 — so the switcher has to write it
+	// explicitly. Without this the choice made here could never reach the exit:
+	// it used to be inferred from AWGI1, and this function only ever writes ""
+	// or "quic" there, so WireGuard silently became AWG for every chained exit.
+	switch {
+	case p.AWG:
+		s.ExitNativeTransport = "awg"
+	case p.Proto == "wg":
+		s.ExitNativeTransport = "wg"
+	default:
+		// h3 / mim / gool / auto: no WireGuard-class transport was selected, so
+		// leave the exit on auto — which keeps AmneziaWG, because plain
+		// WireGuard is measurably easier to block on this network.
+		s.ExitNativeTransport = ""
+	}
 	return s
 }
 

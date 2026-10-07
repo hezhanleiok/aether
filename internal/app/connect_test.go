@@ -18,8 +18,8 @@ import (
 
 // newNativeApp builds a minimal App that takes the native path in tests.
 // ExitChain makes the connect a NATIVE EXIT (the only thing the native
-// transport exists for now); AWGI1="none" pins the transport to plain WG so
-// exactly one transport attempt runs per connect (no AWG->WG fallback, which
+// transport exists for now); ExitNativeTransport="wg" pins the transport to
+// plain WG so exactly one transport attempt runs per connect (no AWG->WG fallback, which
 // would double every hook count below). The native connect fails fast in the
 // test environment (no warp-accounts dir), so no real tunnel is built. A
 // non-nil (but empty) core is supplied so SetNativeState does not dereference
@@ -31,11 +31,11 @@ func newNativeApp() *App {
 		Guard: &watchguard.Watch{},
 		Pool:  &node.Pool{},
 		Settings: config.Settings{
-			NativeWireGuard:  true,
-			Mode:             config.ModeWARP,
-			StackedWireGuard: true,
-			ExitChain:        vpn.ChainPsiphon,
-			AWGI1:            "none", // plain WG, no fallback retry
+			NativeWireGuard:     true,
+			Mode:                config.ModeWARP,
+			StackedWireGuard:    true,
+			ExitChain:           vpn.ChainPsiphon,
+			ExitNativeTransport: "wg", // plain WG, no fallback retry
 		},
 	}
 }

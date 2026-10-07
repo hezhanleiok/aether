@@ -340,15 +340,27 @@ const (
 	nativeTransportWG  = "wg"
 )
 
-// nativeTransportChoice picks the transport for a native exit. AWG is the
-// default (plain WireGuard is measurably easier to block); plain WG is chosen
-// only when the user explicitly turned the obfuscation off — AWGJunk off AND
-// I1 set to "none". Default settings (junk off, I1 empty) mean "not
-// configured", which must NOT be read as "user wants plain WG".
+// nativeTransportChoice picks the transport a native exit (Psiphon/Tor) rides.
+//
+// It reads ExitNativeTransport — a dedicated transport preference — and NOT
+// AWGJunk/AWGI1. Those two are the AmneziaWG obfuscation PARAMETERS (junk
+// decoys and the fake first packet); using them as a transport selector
+// conflated the I1 packet layer with the transport layer and left the UI no
+// way to express "Psiphon should use plain WireGuard" (the switcher could only
+// write AWGI1="" which had to mean "not configured", so it always fell back to
+// AWG and silently added junk + I1 the user had not asked for).
+//
+// "" (auto) and "awg" both mean AmneziaWG: plain WireGuard is measurably
+// easier to block on this network, so auto keeps the obfuscated transport.
+// "wg" is an explicit user choice and is honoured as-is.
 func (a *App) nativeTransportChoice(s config.Settings) string {
-	if !s.AWGJunk && strings.EqualFold(strings.TrimSpace(s.AWGI1), "none") {
+	switch strings.ToLower(strings.TrimSpace(s.ExitNativeTransport)) {
+	case nativeTransportWG:
 		return nativeTransportWG
+	case nativeTransportAWG:
+		return nativeTransportAWG
 	}
+	// "" / unrecognised -> auto -> AWG.
 	return nativeTransportAWG
 }
 
