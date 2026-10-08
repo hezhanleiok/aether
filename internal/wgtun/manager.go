@@ -272,26 +272,38 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	// (startHealthMonitor below), so a tunnel that degrades after connect is
 	// failed over there, not left green.
 	pt.mark("data_plane_start")
-	if err := probeOnceCtx(ctx, dataPlaneReadinessTimeout); err != nil {
-		if err := probeTunnelDataPlane(ctx, 5*time.Second); err != nil {
-			// P5.1: one FINAL data-plane outcome, not one per 300ms retry. A
-			// connect-time failure is recorded (DataPlaneFail/ConsecDPFail) but
-			// NEVER evicts — only the failover path may judge an endpoint dead.
-			func() {
-				c := loadCache()
-				c.recordDataPlane(connected, false)
-				c.save()
-			}()
+	fallbackWon := false
+	if err := verifyDataPlane(ctx); err != nil {
+		// P5.1: one FINAL data-plane outcome, not one per retry. A connect-time
+		// failure is recorded (DataPlaneFail/ConsecDPFail) but NEVER evicts —
+		// only the failover path may judge an endpoint dead.
+		func() {
+			c := loadCache()
+			c.recordDataPlane(connected, false)
+			c.save()
+		}()
+		// The first endpoint handshaked but its data plane is dead. Try a
+		// bounded fallback to the LATER candidates (cands after `connected`)
+		// on the same wintun tunnel and route takeover, instead of failing
+		// the whole connect outright. See connectDataPlaneFallback.
+		if next := connectDataPlaneFallback(ctx, t, rm, cands, connected); next != "" {
+			connected = next
+			fallbackWon = true
+		} else {
 			_ = t.Down()
 			return fmt.Errorf("wgtun: tunnel handshake ok but data plane dead (reverted): %w", err)
 		}
 	}
-	// P5.1: data-plane verified — record the success (once per connect).
-	func() {
-		c := loadCache()
-		c.recordDataPlane(connected, true)
-		c.save()
-	}()
+	// P5.1: data-plane verified — record the success (once per connect). The
+	// fallback path already recorded its winning candidate's success inside
+	// connectDataPlaneFallback; the straight path records `connected` here.
+	if !fallbackWon {
+		func() {
+			c := loadCache()
+			c.recordDataPlane(connected, true)
+			c.save()
+		}()
+	}
 	pt.mark("data_plane_ready")
 	logx.Infof("[wgtun] data plane verified (IP reachability through %s)", connected)
 
@@ -424,6 +436,12 @@ const (
 	// should fail fast so the next is tried), and because the session is already
 	// degraded while this runs.
 	failoverHandshakeTimeout = 6 * time.Second
+	// connectDataPlaneFallbackBudget is how many LATER candidates a connect may
+	// try (after the first endpoint's data plane failed) before giving up. Two,
+	// not more: each candidate costs up to failoverHandshakeTimeout plus a
+	// healthProbeTimeout, and a connect that already completed a handshake must
+	// not turn into a long sweep.
+	connectDataPlaneFallbackBudget = 2
 	// healthInterval is how often the live session is checked.
 	healthIntervalDefault = 10 * time.Second
 	// healthFailStreak is how many consecutive bad checks trigger a failover.
@@ -796,6 +814,20 @@ func probeTunnelDataPlane(ctx context.Context, timeout time.Duration) error {
 	}
 }
 
+// verifyDataPlane runs the connect-stage data-plane verification shared by BOTH
+// the initial endpoint and every fallback candidate: one quick probe, then — on
+// failure — the bounded retry loop that rides out the post-flip FIB convergence.
+// Keeping both paths on the same helper is what stops a transient
+// WSAENETUNREACH from being misread as a dead endpoint during a fallback. The
+// caller records the recordDataPlane outcome; this only answers "does the tunnel
+// carry traffic right now".
+func verifyDataPlane(ctx context.Context) error {
+	if err := probeOnceCtx(ctx, dataPlaneReadinessTimeout); err != nil {
+		return probeTunnelDataPlane(ctx, 5*time.Second)
+	}
+	return nil
+}
+
 // probeOnce is the single-shot form of the data-plane probe, used by the health
 // monitor and by failover verification, where a slow retry loop would cost more
 // than the reaction budget.
@@ -974,6 +1006,87 @@ func handshakeAcross(t *tunnel, cands []liveEndpoint, timeout time.Duration) (st
 		lastErr = fmt.Errorf("no candidates")
 	}
 	return "", fmt.Errorf("no endpoint completed a handshake among %d candidates: %w", len(cands), lastErr)
+}
+
+// fallbackCandidates returns up to `budget` candidates that follow `current` in
+// the ranked list, or nil when `current` is absent. It is a pure slice helper so
+// the candidate selection (index + budget cap) is unit-testable without a real
+// tunnel or route manager.
+func fallbackCandidates(cands []liveEndpoint, current string, budget int) []liveEndpoint {
+	idx := -1
+	for i, c := range cands {
+		if c.Addr == current {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+	out := cands[idx+1:]
+	if len(out) > budget {
+		out = out[:budget]
+	}
+	return out
+}
+
+// connectDataPlaneFallback tries up to connectDataPlaneFallbackBudget candidates
+// that follow `current` in the ranked list, after `current` handshaked but its
+// data plane failed. It reuses failover's route discipline: each candidate is
+// pinned on the physical link before its handshake (otherwise the handshake
+// loops into the just-takeover tunnel), dropped on failure, and only the winning
+// candidate keeps its route — the previous endpoint's route is dropped only then,
+// so a failed attempt never strands the session.
+//
+// The caller has already recorded `current`'s data-plane failure and keeps the
+// route takeover up for the whole loop (the Start path's deferred rm.Revert
+// still cleans everything if no candidate wins). A winning candidate records its
+// own data-plane success here; a candidate whose handshake failed records
+// nothing here (it was never handed to handshakeAcross, so its handshake
+// accounting is out of scope for the fallback). Returns the winning endpoint or
+// "" when the budget is exhausted or no later candidate exists.
+func connectDataPlaneFallback(ctx context.Context, t *tunnel, rm *routeManager, cands []liveEndpoint, current string) string {
+	nexts := fallbackCandidates(cands, current, connectDataPlaneFallbackBudget)
+	prev := current
+	for _, next := range nexts {
+		if ctx.Err() != nil {
+			break
+		}
+		if err := rm.addEndpointRouteFor(next.Addr); err != nil {
+			logx.Warnf("[wgtun] data-plane fallback: route for %s: %v", next.Addr, err)
+			continue
+		}
+		if err := t.setEndpoint(next.Addr); err != nil {
+			logx.Warnf("[wgtun] data-plane fallback: set %s: %v", next.Addr, err)
+			_ = rm.dropEndpointRoute(next.Addr)
+			continue
+		}
+		if err := t.waitHandshakeCtx(ctx, failoverHandshakeTimeout); err != nil {
+			logx.Warnf("[wgtun] data-plane fallback: handshake %s: %v", next.Addr, err)
+			_ = rm.dropEndpointRoute(next.Addr)
+			continue
+		}
+		if err := verifyDataPlane(ctx); err != nil {
+			logx.Warnf("[wgtun] data-plane fallback: data plane via %s: %v", next.Addr, err)
+			func() {
+				c := loadCache()
+				c.recordDataPlane(next.Addr, false)
+				c.save()
+			}()
+			_ = rm.dropEndpointRoute(next.Addr)
+			continue
+		}
+		// Success: drop the previous endpoint's route, keep next's.
+		_ = rm.dropEndpointRoute(prev)
+		func() {
+			c := loadCache()
+			c.recordDataPlane(next.Addr, true)
+			c.save()
+		}()
+		logx.Infof("[wgtun] data-plane fallback complete: %s -> %s", prev, next.Addr)
+		return next.Addr
+	}
+	return ""
 }
 
 // speedSampleDelay is how long the speed sample waits after a connect before
