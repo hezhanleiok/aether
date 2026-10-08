@@ -295,15 +295,17 @@ func (m *Manager) Start(ctx context.Context, cfg Config, onPhase func(string)) e
 	pt.mark("data_plane_ready")
 	logx.Infof("[wgtun] data plane verified (IP reachability through %s)", connected)
 
-	// P6: progressive throughput ranking. The just-connected endpoint is measured
-	// first (no switch); only when a clearly faster candidate exists does the
-	// connect hot-switch and re-measure, bounded by throughputTotalBudget. Runs
-	// synchronously so the "Connected" transition carries the chosen endpoint,
-	// and is best-effort: a failed probe leaves the connect on the current
-	// endpoint. Skipped in survival mode (ConnectSpeedSample=false) like the
+	// P6: connect-time throughput observation. The endpoint we just connected to
+	// is sampled once and logged; it is never switched and the sample is never
+	// cached (see observeThroughput for both reasons). Endpoint ranking gets its
+	// real-throughput signal from the delayed steady-state sample below, which
+	// IS written to the cache.
+	//
+	// Best-effort: a failed sample never fails a connect that already carries
+	// traffic. Skipped in survival mode (ConnectSpeedSample=false) like the
 	// delayed speed sample below.
 	if ConnectSpeedSample {
-		connected = progressiveThroughput(ctx, t, rm, cands, connected)
+		observeThroughput(ctx, connected)
 	}
 
 	// Speed sample is best-effort: it needs a hostname (DNS through the tunnel),
@@ -1089,32 +1091,20 @@ func measureTunnelSpeed(window time.Duration) (float64, error) {
 	return float64(total) * 8 / (elapsed * 1_000_000), nil
 }
 
-// Connect-time throughput-probe constants for the progressive endpoint ranking.
-// The sample is deliberately short and multi-stream: a single TCP connection is
-// slow-start-bound for its first seconds and under-reads the link by an order of
-// magnitude (2.6 vs 63 Mbps observed 2026-10-04), while several concurrent
-// streams overlap their slow-starts and approximate the aggregate rate in a
-// short window. throughputTotalBudget bounds how much extra time a connect may
-// spend hunting for a faster endpoint, so a slow first endpoint can never turn a
-// few-second connect into a long one.
+// Connect-time throughput-sample constants. The sample is deliberately short
+// and multi-stream: a single TCP connection is slow-start-bound for its first
+// seconds and under-reads the link by an order of magnitude (2.6 vs 63 Mbps
+// observed 2026-10-04), while several concurrent streams overlap their
+// slow-starts and approximate the aggregate rate in a short window.
+//
+// There is deliberately no "hunt for a faster endpoint" budget here. A connect
+// samples ONLY the endpoint it just connected to and records the result; a
+// faster endpoint is surfaced on later connects through the cache, never by
+// hot-switching the peer mid-connect (see measureAndRecordThroughput).
 const (
-	throughputStreams          = 4
-	throughputMeasureWindow    = 2 * time.Second
-	throughputBytesPerStream   = 20 * 1024 * 1024
-	throughputTotalBudget      = 8 * time.Second
-	throughputHandshakeTimeout = 3 * time.Second
-	// throughputRelativeGain is the "clearly faster" bar: a candidate must beat
-	// the best so far by this factor to be adopted. Below it, the connect stops
-	// measuring rather than chase a marginal gain within sample noise.
-	throughputRelativeGain = 1.30
-	// throughputIterReserve is the worst-case cost of ONE more candidate
-	// iteration: a handshake that times out costs throughputHandshakeTimeout and
-	// is skipped without measuring, one that succeeds costs <1s plus the 2s
-	// sample — so an iteration is always <= throughputHandshakeTimeout. The
-	// budget check reserves it so a candidate is never STARTED when finishing it
-	// would run past the budget. Without the reserve the last iteration always
-	// overshot (observed 2026-10-08: 8s budget, ~10s actually spent).
-	throughputIterReserve = 3 * time.Second
+	throughputStreams        = 4
+	throughputMeasureWindow  = 2 * time.Second
+	throughputBytesPerStream = 20 * 1024 * 1024
 )
 
 // measureTunnelSpeedParallel samples the live tunnel's download throughput with
@@ -1200,108 +1190,32 @@ func measureTunnelSpeedParallel(ctx context.Context, streams int, window time.Du
 	return mbps, nil
 }
 
-// restoreEndpoint points the device back at endpoint and re-handshakes. It undoes
-// a probe that hot-switched away from the endpoint we decided to keep, and is a
-// best-effort helper (a failure is logged, never fatal to the connect).
-func restoreEndpoint(ctx context.Context, t *tunnel, endpoint string) error {
-	if endpoint == "" {
-		return nil
-	}
-	if err := t.setEndpoint(endpoint); err != nil {
-		logx.Warnf("[wgtun] restore endpoint %s: %v", endpoint, err)
-		return err
-	}
-	if err := t.waitHandshakeCtx(ctx, throughputHandshakeTimeout); err != nil {
-		logx.Warnf("[wgtun] restore handshake %s: %v", endpoint, err)
-		return err
-	}
-	return nil
-}
-
-// progressiveThroughput measures the just-connected endpoint's throughput and,
-// only when a clearly faster candidate exists, hot-switches to it — bounded by
-// throughputTotalBudget so a slow first endpoint can never turn a few-second
-// connect into a long sweep. It reuses failover's route discipline: every
-// candidate handshake is pinned on the physical link first (addEndpointRouteFor),
-// otherwise the handshake leaves via the default route, i.e. into its own
-// tunnel. Every step is best-effort: a candidate that cannot route/handshake/
-// measure is skipped, and a failed probe never aborts a connect that already
-// carries traffic. Returns the endpoint to keep (current when nothing clearly
-// better was found).
+// observeThroughput samples the live tunnel's throughput once, right after the
+// connect, and logs it. It never switches the endpoint and never writes the
+// cache:
 //
-// These samples are used ONLY for this connect's own comparison: measured right
-// after each handshake, they sit deep in TCP slow-start and read far below the
-// steady-state rate (observed 2026-10-08: 1.6 Mbps at connect vs 18.5 Mbps once
-// the flow ramped on the very same endpoint). They are therefore deliberately NOT
-// written to the endpoint cache — persisting them would poison LastSpeedMbps with
-// a systematic underestimate and demote good endpoints. The cache is fed by the
-// delayed steady-state sample (scheduleSpeedSample) instead. The comparison here
-// stays valid because every candidate is measured at the same point in its own
-// slow-start, so the numbers are comparable to each other even when they are not
-// the link's real capacity.
-func progressiveThroughput(ctx context.Context, t *tunnel, rm *routeManager, cands []liveEndpoint, current string) string {
-	start := time.Now()
-	best := current
-
-	ta, err := measureTunnelSpeedParallel(ctx, throughputStreams, throughputMeasureWindow, throughputBytesPerStream)
+//   - No switch. A probe that moves the peer has to move it back afterwards, and
+//     the restore is the dangerous half: it races the endpoint's real handshake
+//     time under a short budget, and losing that race leaves the peer pointed at
+//     an endpoint whose handshake never completed while Start still reports
+//     Connected (observed 2026-10-08: a healthy 134 Mbps endpoint was abandoned
+//     to probe a candidate; the 3s restore timed out on an endpoint whose
+//     handshake really takes ~8.7s, and every later packet failed while the
+//     session stayed green). Measuring in place cannot corrupt the session, so
+//     a faster endpoint is instead surfaced on later connects through the cache.
+//   - No cache write. This sample is taken deep in TCP slow-start and reads far
+//     below the steady-state rate (1.6 Mbps at connect vs 18.5 Mbps once the
+//     flow ramped on the very same endpoint), so persisting it would poison
+//     LastSpeedMbps with a systematic underestimate and demote good endpoints.
+//     Endpoint ranking reads the delayed steady-state sample
+//     (scheduleSpeedSample), which is the one written to the cache.
+func observeThroughput(ctx context.Context, current string) {
+	mbps, err := measureTunnelSpeedParallel(ctx, throughputStreams, throughputMeasureWindow, throughputBytesPerStream)
 	if err != nil {
 		logx.Warnf("[wgtun] throughput probe on %s: %v", current, err)
-		return current
+		return
 	}
-	bestMbps := ta
-	logx.Infof("[wgtun] throughput %s: %.1f Mbps", current, ta)
-
-	// cur tracks which endpoint the device is pointed at (and which therefore
-	// still owns a host route). It starts at current.
-	cur := current
-	for _, c := range cands {
-		if c.Addr == current {
-			continue
-		}
-		// Budget check reserves one iteration: the question is whether starting
-		// this candidate can still FINISH within throughputTotalBudget, not
-		// whether we have already spent the budget.
-		if ctx.Err() != nil || time.Since(start)+throughputIterReserve > throughputTotalBudget {
-			break
-		}
-		if err := rm.addEndpointRouteFor(c.Addr); err != nil {
-			logx.Warnf("[wgtun] throughput probe: route for %s: %v", c.Addr, err)
-			continue
-		}
-		if err := t.setEndpoint(c.Addr); err != nil {
-			logx.Warnf("[wgtun] throughput probe: set %s: %v", c.Addr, err)
-			_ = rm.dropEndpointRoute(c.Addr)
-			continue
-		}
-		if err := t.waitHandshakeCtx(ctx, throughputHandshakeTimeout); err != nil {
-			logx.Warnf("[wgtun] throughput probe: handshake %s: %v", c.Addr, err)
-			_ = rm.dropEndpointRoute(c.Addr)
-			_ = restoreEndpoint(ctx, t, cur)
-			continue
-		}
-		mc, err := measureTunnelSpeedParallel(ctx, throughputStreams, throughputMeasureWindow, throughputBytesPerStream)
-		if err != nil {
-			logx.Warnf("[wgtun] throughput probe on %s: %v", c.Addr, err)
-			_ = rm.dropEndpointRoute(c.Addr)
-			_ = restoreEndpoint(ctx, t, cur)
-			continue
-		}
-		logx.Infof("[wgtun] throughput %s: %.1f Mbps", c.Addr, mc)
-		if mc > bestMbps*throughputRelativeGain {
-			// Adopt: drop the previous best's route, keep c's.
-			_ = rm.dropEndpointRoute(cur)
-			cur = c.Addr
-			best = c.Addr
-			bestMbps = mc
-		} else {
-			// c is not clearly faster; later candidates rank lower still — stop
-			// measuring and restore the endpoint we are keeping.
-			_ = rm.dropEndpointRoute(c.Addr)
-			_ = restoreEndpoint(ctx, t, cur)
-			break
-		}
-	}
-	return best
+	logx.Infof("[wgtun] throughput %s: %.1f Mbps (connect-time sample, not cached)", current, mbps)
 }
 
 // HealthMonitor enables the background liveness watch and automatic failover of

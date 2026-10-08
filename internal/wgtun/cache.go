@@ -360,6 +360,20 @@ func (e endpointEntry) state() endpointState {
 	}
 }
 
+// lastGoodTrustworthy reports whether an endpoint still deserves the LastGood
+// absolute-first privilege. The bar is TWO consecutive data-plane failures: a
+// single failure can still be transient even after the probe retry loop, while
+// two across separate connects point at the endpoint, not the network.
+//
+// It reads ConsecDPFail directly rather than state(): state()'s Suspect
+// threshold (3) is a POOL-MEMBERSHIP concept, not a trust concept, and reusing
+// it would either withdraw the privilege too late (>=3) or conflate two
+// different meanings. recordDataPlane(true) resets ConsecDPFail to 0, so the
+// privilege restores itself on the next successful session — no extra recovery.
+func (e endpointEntry) lastGoodTrustworthy() bool {
+	return e.ConsecDPFail < 2
+}
+
 // healthyCount reports how many cached endpoints are currently Healthy (the
 // Healthy Pool size).
 func (c endpointCache) healthyCount() int {

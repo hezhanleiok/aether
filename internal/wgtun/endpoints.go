@@ -469,9 +469,21 @@ func orderHandshakeCandidates(eps []liveEndpoint) []liveEndpoint {
 // its relative order. If LastGood is absent (excluded, dead on liveness, or not
 // yet cached) or already first, the list is returned unchanged.
 func lastGoodFirst(eps []liveEndpoint) []liveEndpoint {
-	lg := loadCache().LastGood
+	c := loadCache()
+	lg := c.LastGood
 	if lg == "" || len(eps) < 2 {
 		return eps
+	}
+	// Withdraw the absolute-first privilege once the endpoint has failed its
+	// data plane twice in a row: fast-pathing onto it again would keep handing
+	// the connect a tunnel that cannot carry traffic. It stays in the list and
+	// is ranked normally by qualityScore (which already demotes ConsecDPFail via
+	// stabilityScore); the LastGood field is NOT cleared, so a later
+	// recordDataPlane(true) restores the privilege automatically.
+	for _, e := range c.Endpoints {
+		if e.Addr == lg && !e.lastGoodTrustworthy() {
+			return eps
+		}
 	}
 	for i, e := range eps {
 		if e.Addr != lg {
