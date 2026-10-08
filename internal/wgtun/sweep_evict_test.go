@@ -134,3 +134,59 @@ func TestEvictedEndpointNotReoffered(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// D2: evict / recordFailure must clear a stale LastGood
+// ---------------------------------------------------------------------------
+
+// TestEvictClearsLastGood pins that evicting the last-known-good endpoint also
+// clears the LastGood field, so the next connect cannot fast-path back onto the
+// endpoint that was just judged dead (observed 2026-10-08: 8.39.125.195:1843
+// was evicted by failover yet stayed LastGood and was re-selected every time).
+func TestEvictClearsLastGood(t *testing.T) {
+	c := &endpointCache{
+		LastGood:   "a:1",
+		LastGoodAt: time.Now(),
+		Endpoints:  []endpointEntry{{Addr: "a:1"}, {Addr: "b:1"}},
+	}
+	c.evict("a:1")
+	if c.LastGood != "" {
+		t.Fatalf("LastGood = %q, want empty after evicting it", c.LastGood)
+	}
+	if !c.LastGoodAt.IsZero() {
+		t.Fatalf("LastGoodAt not zeroed after evict: %v", c.LastGoodAt)
+	}
+}
+
+// TestEvictOtherDoesNotClearLastGood pins the reverse: evicting a DIFFERENT
+// endpoint must leave the last-known-good untouched.
+func TestEvictOtherDoesNotClearLastGood(t *testing.T) {
+	c := &endpointCache{
+		LastGood:   "a:1",
+		LastGoodAt: time.Now(),
+		Endpoints:  []endpointEntry{{Addr: "a:1"}, {Addr: "b:1"}},
+	}
+	c.evict("b:1")
+	if c.LastGood != "a:1" {
+		t.Fatalf("LastGood = %q, want a:1 (evicting another endpoint must not clear it)", c.LastGood)
+	}
+}
+
+// TestRecordFailureThresholdClearsLastGood pins that recordFailure reaching the
+// eviction threshold clears LastGood the same way evict does.
+func TestRecordFailureThresholdClearsLastGood(t *testing.T) {
+	c := &endpointCache{
+		LastGood:   "a:1",
+		LastGoodAt: time.Now(),
+		Endpoints:  []endpointEntry{{Addr: "a:1"}},
+	}
+	for i := 0; i < failThreshold; i++ {
+		c.recordFailure("a:1")
+	}
+	if c.LastGood != "" {
+		t.Fatalf("LastGood = %q, want empty after recordFailure hit the threshold", c.LastGood)
+	}
+	if len(c.Endpoints) != 0 {
+		t.Fatalf("endpoint still cached after %d failures: %+v", failThreshold, c.Endpoints)
+	}
+}

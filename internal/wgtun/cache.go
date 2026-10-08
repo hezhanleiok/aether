@@ -630,6 +630,16 @@ func (c *endpointCache) evict(addr string) {
 	}
 	if removed {
 		c.Endpoints = out
+		// The endpoint was judged dead and removed. It must not remain the
+		// last-known-good target either: cachedCandidates fast-paths LastGood to
+		// the front on the next connect, so a stale LastGood here would hand the
+		// next connect straight back to the endpoint we just evicted (observed
+		// 2026-10-08: 8.39.125.195:1843 was evicted by failover yet stayed
+		// LastGood and was re-selected on every subsequent connect).
+		if c.LastGood == addr {
+			c.LastGood = ""
+			c.LastGoodAt = time.Time{}
+		}
 	}
 }
 
@@ -644,6 +654,12 @@ func (c *endpointCache) recordFailure(addr string) {
 		c.Endpoints[i].FailCount++
 		if c.Endpoints[i].FailCount >= failThreshold {
 			c.Endpoints = append(c.Endpoints[:i], c.Endpoints[i+1:]...)
+			// Same stale-LastGood hazard as evict: an endpoint removed for
+			// repeated failure must not stay the next connect's fast-path target.
+			if c.LastGood == addr {
+				c.LastGood = ""
+				c.LastGoodAt = time.Time{}
+			}
 		}
 		return
 	}
