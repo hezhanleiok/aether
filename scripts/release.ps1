@@ -41,7 +41,7 @@ try {
 
     # ---------------------------------------------------------------- Build
     Write-Host "[1/6] Build" -ForegroundColor Cyan
-    go build -ldflags="-H=windowsgui" -o (Join-Path $build "Xiaohe.exe") ./cmd/aethergui
+    go build -tags wgtun -ldflags="-H=windowsgui" -o (Join-Path $build "Xiaohe.exe") ./cmd/aethergui
     if ($LASTEXITCODE -ne 0) { throw "GUI build failed" }
     Write-Host "      GUI      -> Xiaohe.exe"
 
