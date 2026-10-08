@@ -72,6 +72,7 @@ Xiaohe.exe (Go 外壳)
 - **Windows 接管**：系统代理（注册表快照/恢复）、PAC 分流（用户规则）、LAN 例外、Kill Switch（防火墙规则组）
 - **IPv4/IPv6/双栈**、自定义 DNS、DoH 端点、DNS 防泄漏、DNS 分流
 - **自动化**：开机启动（HKCU Run + `--connect`）、网络变化重连、断线重连、Gateway 失效切换、缓存 Gateway、重扫
+- **连接稳定性**：连接阶段对端点做数据面校验，失败时自动回退到后续候选；失效端点被清除时同步移除「最近可用」标记，避免坏端点被反复优先选中
 - **节点列表**：Cloudflare 边缘池、IP/国家/延迟/状态、连接后出口 IP + 国旗（🇯🇵🇺🇸…）
 - **Core 管理 UI**：主界面 Core 徽标（Ready/Running/Missing/版本）、设置页路径配置 + Detect/Restart/Stop
 

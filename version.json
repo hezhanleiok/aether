@@ -2,7 +2,7 @@
   "gui": {
     "version": "1.2.0",
     "url": "https://github.com/hezhanleiok/aether/releases/download/v1.2.0/Xiaohe-1.2.0-win-x64.zip",
-    "notes": "移除赛风(Psiphon)；内置核心重装为官方 v2.1.0 并校验 SHA256；修复系统代理被写入死地址导致全部网页打不开。WireGuard / Gool / MasqueH3 实测可用，MasqueH2 与 MIM 在当前网络下如实标注为可能不可用"
+    "notes": "移除赛风(Psiphon)；内置核心重装为官方 v2.1.0 并校验 SHA256；修复系统代理被写入死地址导致全部网页打不开。增强连接稳定性：修复连接建立后测速热切换导致的偶发断连，端点数据面失败时自动回退候选，并修复失效端点被反复优先选中的问题。WireGuard / Gool / MasqueH3 实测可用，MasqueH2 与 MIM 在当前网络下如实标注为可能不可用"
   },
   "core": {
     "version": "v2.1.0",
